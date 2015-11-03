@@ -195,8 +195,10 @@ As all EXPRESSION must evaluate to a string, and we concat strings by adding
 them to a list, this is just a `progn'."
   `(progn
      ,@(mapcar (lambda (expr)
-                 `(unless (eq 'string ,(wordgen--compile-expression expr))
-                    (error "Arguments of ++ must be strings")))
+                 `(let ((result ,(wordgen--compile-expression expr)))
+                    (unless (eq 'string result)
+                      (error "Arguments of ++ must be strings"))
+                    result))
                expressions)))
 
 (defun wordgen--compile-replicate (times expr)
