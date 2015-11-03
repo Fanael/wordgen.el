@@ -123,7 +123,11 @@ Should be t at all times, expect when debugging.")
         ;; to nil.
         (cl-letf (((symbol-function #'byte-compile-log-warning) #'ignore)
                   (lexical-binding t)
-                  (byte-compile-warnings nil))
+                  (byte-compile-warnings nil)
+                  (byte-compile-verbose nil)
+                  (byte-optimize t)
+                  (byte-compile-delete-errors t)
+                  (byte-compile-generate-call-tree nil))
           (byte-compile func))
       ;; Not compiling, just return the lambda.
       func)))
