@@ -170,7 +170,7 @@ consecutive running total weights."
                       `((< rolled-number ,total-weight-so-far)
                         ,(wordgen--compile-expression expr))))
                   vec)))
-    `(let ((rolled-number (wordgen--prng-next-int ,(1- total-weight-so-far) rng)))
+    `(let ((rolled-number (wordgen-prng-next-int ,(1- total-weight-so-far) rng)))
        (cond
         ,@cond-clauses))))
 

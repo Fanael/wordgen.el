@@ -102,14 +102,14 @@ LIMIT must be a non-negative integer smaller than 2^32-1."
     (while (< actual-limit (setq result (funcall rng))))
     (/ result scaling-factor)))
 
-(defun wordgen--prng-next-int (limit rng)
+(defun wordgen-prng-next-int (limit rng)
   "Return a pseudo-random integer in interval [0, LIMIT] using RNG.
 LIMIT must be a non-negative integer."
   (cond
    ((< limit #xFFFFFFFF) (wordgen--prng-next-int-small limit rng))
    ((= limit #xFFFFFFFF) (funcall rng))
    (t (let ((result nil))
-        (while (> (setq result (+ (lsh (wordgen--prng-next-int (lsh limit -32) rng) 32)
+        (while (> (setq result (+ (lsh (wordgen-prng-next-int (lsh limit -32) rng) 32)
                                   (funcall rng)))
                   limit))
         result))))
