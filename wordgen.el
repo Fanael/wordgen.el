@@ -7,7 +7,7 @@
 
 ;; This file is NOT part of GNU Emacs.
 
-;; Copyright (c) 2015, Fanael Linithien
+;; Copyright (c) 2015-2016, Fanael Linithien
 ;; All rights reserved.
 ;;
 ;; Redistribution and use in source and binary forms, with or without
@@ -37,7 +37,9 @@
 
 ;;; Code:
 (eval-when-compile (require 'cl-lib))
-(require 'wordgen-prng)
+
+
+;;; Public interface
 
 ;;;###autoload
 (cl-defun wordgen (ruleset &key (word-count 1) (starting-rule nil) (seed nil))
@@ -102,6 +104,9 @@ RULESET is the rule set we're using.
 RNG is the pseudo-random number generator.
 RULE-DESC is the rule descriptor to call."
   (funcall rule-desc ruleset rng))
+
+
+;;; Expression compiler
 
 ;; Wordgen code is made executable by converting its expressions to Emacs Lisp
 ;; forms, which then are joined together (which is trivial, as Emacs Lisp is a
@@ -191,7 +196,7 @@ consecutive running total weights."
   "Compile concatenation to an Emacs Lisp form.
 EXPRESSIONS is a list of subexpressions.
 
-As all EXPRESSION must evaluate to a string, and we concat strings by adding
+As all EXPRESSIONS must evaluate to a string, and we concat strings by adding
 them to a list, this is just a `progn'."
   `(progn
      ,@(mapcar (lambda (expr)
@@ -249,6 +254,16 @@ If TIMES is <= 0, the whole eval-multiple-times evaluates to an empty string."
   "Compile a call to rule RULE-NAME."
   `(wordgen-call-rule-by-name rules rng ',rule-name))
 
+
+;;; PRNG helpers
+
+(when (< most-positive-fixnum #xFFFFFFFF)
+  (error "This package requires Lisp integers to be at least 32-bit"))
+
+(eval-and-compile
+  (defconst wordgen--prng-array-size 128)
+  (defconst wordgen--prng-optimal-bytes-size (* 4 wordgen--prng-array-size)))
+
 (defun wordgen--get-default-seed ()
   "Get the PRNG default seed.
 When available, uses /dev/urandom."
@@ -262,6 +277,81 @@ When available, uses /dev/urandom."
                            "count=1"))
       (0 (buffer-string))
       (_ (current-time-string)))))
+
+
+;;; PRNG engine
+
+(defun wordgen--prng-create (passed-array)
+  "Create a PRNG seeded using PASSED-ARRAY.
+PASSED-ARRAY must be a vector of 128 32-bit integers."
+  (let ((index 0)
+        (array (copy-sequence passed-array)))
+    (lambda ()
+      (cl-macrolet
+          ((as-index
+            (index)
+            `(logand ,index ,(- (1- wordgen--prng-array-size))))
+           (xorshift
+            (shift value)
+            (let ((value-symbol (make-symbol "value")))
+              `(let ((,value-symbol ,value))
+                 (logxor ,value-symbol
+                         ,(if (> shift 0)
+                              ;; We're shifting left, so the result may be bigger than 32
+                              ;; bits; truncate it.
+                              `(logand (lsh ,value-symbol ,shift) #xFFFFFFFF)
+                            `(lsh ,value-symbol ,shift)))))))
+        (let* ((result
+                (logxor (xorshift -12 (xorshift 17 (aref array index)))
+                        (xorshift -15 (xorshift 13 (aref array (as-index (+ index 33))))))))
+          (aset array index result)
+          (setq index (as-index (1+ index)))
+          result)))))
+
+(defun wordgen--prng-create-from-bytes (bytes)
+  "Create a prng seeded from BYTES.
+BYTES should be a sequence of integers."
+  (let* ((array (make-vector wordgen--prng-array-size 0))
+         (bytes-word-len (/ (length bytes) 4))
+         (i 0)
+         (max-words (min wordgen--prng-array-size bytes-word-len)))
+    (while (< i max-words)
+      (let ((word 0))
+        (dotimes (k 4)
+          (setq word (lsh word 8))
+          (setq word (+ word (logand #xFF (elt bytes (+ k (* i 4)))))))
+        (aset array i word))
+      (setq i (1+ i)))
+    ;; No more words in bytes, fill the state using a linear congruential
+    ;; generator.
+    (let ((seed (if (= i 0) 1 (aref array (1- i)))))
+      (while (< i wordgen--prng-array-size)
+        (setq seed (logand #xFFFFFFFF (+ 1013904223 (* 1664525 seed))))
+        (aset array i seed)
+        (setq i (1+ i))))
+    (wordgen--prng-create array)))
+
+(defun wordgen--prng-next-int-small (limit rng)
+  "Return a 32-bit pseudo-random integer in interval [0, LIMIT] using RNG.
+LIMIT must be a non-negative integer smaller than 2^32-1."
+  (let* ((range (1+ limit))
+         (scaling-factor (/ #xFFFFFFFF range))
+         (actual-limit (* range scaling-factor))
+         (result nil))
+    (while (< actual-limit (setq result (funcall rng))))
+    (/ result scaling-factor)))
+
+(defun wordgen-prng-next-int (limit rng)
+  "Return a pseudo-random integer in interval [0, LIMIT] using RNG.
+LIMIT must be a non-negative integer."
+  (cond
+   ((< limit #xFFFFFFFF) (wordgen--prng-next-int-small limit rng))
+   ((= limit #xFFFFFFFF) (funcall rng))
+   (t (let ((result nil))
+        (while (> (setq result (+ (lsh (wordgen-prng-next-int (lsh limit -32) rng) 32)
+                                  (funcall rng)))
+                  limit))
+        result))))
 
 (provide 'wordgen)
 ;;; wordgen.el ends here
