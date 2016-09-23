@@ -116,7 +116,7 @@ RULE-DESC is the rule descriptor to call."
 
 (defvar wordgen--compile-to-bytecode t
   "If non-nil, compile the generated lambdas to Emacs bytecode.
-Should be t at all times, expect when debugging.")
+Should be t at all times, except when debugging.")
 
 (defun wordgen--compile-rule-body (expression)
   "Compile rule body EXPRESSION to an Emacs Lisp function."
