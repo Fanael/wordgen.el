@@ -1,4 +1,4 @@
-;;; wordgen-prng.el --- Pseudo-random number generator -*- lexical-binding: t -*-
+;;; wordgen.el --- Random word generator -*- lexical-binding: t -*-
 
 ;; Author: Fanael Linithien <fanael4@gmail.com>
 ;; URL: https://github.com/Fanael/wordgen.el
