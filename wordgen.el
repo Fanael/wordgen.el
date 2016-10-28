@@ -80,7 +80,7 @@ The strings are concantenated in the order of the `wordgen-print-string' calls."
 The string is printed to the innermost enclosing
 `wordgen-with-output-to-string'."
   (push string wordgen--output-strings)
-  'string)
+  "")
 
 (defun wordgen-evaluate-ruleset (ruleset rng &optional starting-rule)
   "Evaluate the RULESET using pseudo-random generator RNG.
@@ -201,7 +201,7 @@ them to a list, this is just a `progn'."
   `(progn
      ,@(mapcar (lambda (expr)
                  `(let ((result ,(wordgen--compile-expression expr)))
-                    (unless (eq 'string result)
+                    (unless (stringp result)
                       (error "Arguments of ++ must be strings"))
                     result))
                expressions)))
@@ -220,11 +220,11 @@ If TIMES is <= 0, the whole replicate evaluates to an empty string."
        (when (> times 0)
          (let ((string
                 (wordgen-with-output-to-string
-                  (unless (eq 'string ,expr-compiled)
+                  (unless (stringp ,expr-compiled)
                     (error "Second argument of replicate must be a string")))))
            (dotimes (_ times)
              (push string wordgen--output-strings))))
-       'string)))
+       "")))
 
 (defun wordgen--compile-eval-multiple-times (times expr)
   "Compile an eval-multiple-times expression to an Emacs Lisp form.
@@ -239,7 +239,7 @@ If TIMES is <= 0, the whole eval-multiple-times evaluates to an empty string."
        (unless (integerp times)
          (error "Evaluation count %S is not an integer" times))
        (if (<= times 0)
-           'string
+           ""
          ;; Run the loop N-1 times, so the result of the if will be the same as
          ;; that of last expr evaluation.
          (dotimes (_ (1- times))
