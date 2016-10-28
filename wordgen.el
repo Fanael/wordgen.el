@@ -75,7 +75,10 @@ The strings are concantenated in the order of the `wordgen-print-string' calls."
      (progn ,@body)
      (apply #'concat (nreverse wordgen--output-strings))))
 
-(defun wordgen-print-string (string)
+;; NB: `cl-defsubst', not `defsubst', as the former generates slightly better
+;; bytecode. This comes at the cost of the arguments being immutable, but
+;; `wordgen-print-string' doesn't need to change its argument anyway.
+(cl-defsubst wordgen-print-string (string)
   "Print a STRING.
 The string is printed to the innermost enclosing
 `wordgen-with-output-to-string'."
