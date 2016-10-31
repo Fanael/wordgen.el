@@ -36,6 +36,7 @@
 ;;
 
 ;;; Code:
+(eval-when-compile (require 'pcase))
 (eval-when-compile (require 'cl-lib))
 
 
@@ -121,23 +122,26 @@ RULE-DESC is the rule descriptor to call."
   "If non-nil, compile the generated lambdas to Emacs bytecode.
 Should be t at all times, except when debugging.")
 
+(defun wordgen--compile-lambda (lambda*)
+  (if wordgen--compile-to-bytecode
+      ;; We have to silence `byte-compile-log-warning' as it can log some
+      ;; warnings to *Compile-Log* even though we set `byte-compile-warnings'
+      ;; to nil.
+      (cl-letf (((symbol-function #'byte-compile-log-warning) #'ignore)
+                (lexical-binding t)
+                (byte-compile-warnings nil)
+                (byte-compile-verbose nil)
+                (byte-optimize t)
+                (byte-compile-generate-call-tree nil))
+        (byte-compile lambda*))
+    ;; Not compiling, just return the lambda.
+    lambda*))
+
 (defun wordgen--compile-rule-body (expression)
   "Compile rule body EXPRESSION to an Emacs Lisp function."
   (let ((func `(lambda (rules rng)
                  ,(wordgen--compile-expression expression))))
-    (if wordgen--compile-to-bytecode
-        ;; We have to silence `byte-compile-log-warning' as it can log some
-        ;; warnings to *Compile-Log* even though we set `byte-compile-warnings'
-        ;; to nil.
-        (cl-letf (((symbol-function #'byte-compile-log-warning) #'ignore)
-                  (lexical-binding t)
-                  (byte-compile-warnings nil)
-                  (byte-compile-verbose nil)
-                  (byte-optimize t)
-                  (byte-compile-generate-call-tree nil))
-          (byte-compile func))
-      ;; Not compiling, just return the lambda.
-      func)))
+    (wordgen--compile-lambda func)))
 
 (defun wordgen--compile-expression (expression)
   "Compile EXPRESSION to an Emacs Lisp form."
@@ -160,26 +164,76 @@ Should be t at all times, except when debugging.")
 (defun wordgen--compile-choice-expr (vec)
   "Compile choice expression VEC to an Emacs Lisp form.
 
-Currently it's done by turning it into cond, comparing the rolled number against
+Currently it's done by either building a vector of compiled forms and choosing a
+random index, or by turning it into cond, comparing the rolled number against
 consecutive running total weights."
-  ;; TODO: consider compiling to jump tables where appropriate.
-  (let* ((total-weight-so-far 0)
-         (cond-clauses
-          (mapcar (lambda (subexpr)
-                    (let ((weight 1)
-                          (expr subexpr))
-                      (pcase subexpr
-                        ((and `(,subexpr-weight ,subexpr-expr)
-                              (guard (integerp subexpr-weight)))
-                         (setq weight subexpr-weight)
-                         (setq expr subexpr-expr)))
-                      (setq total-weight-so-far (+ total-weight-so-far weight))
-                      `((< rolled-number ,total-weight-so-far)
-                        ,(wordgen--compile-expression expr))))
-                  vec)))
-    `(let ((rolled-number (wordgen-prng-next-int ,(1- total-weight-so-far) rng)))
-       (cond
-        ,@cond-clauses))))
+  (let ((weighted-exprs '())
+        (running-total-weight 0)
+        (only-strings t))
+    ;; First, transform each subexpression into a list of the form
+    ;; (EXPR WEIGHT RUNNING-WEIGHT)
+    (dotimes (i (length vec))
+      (let* ((subexpr (aref vec i))
+             (transformed
+              (pcase subexpr
+                ((and `(,weight ,subexpr-expr)
+                      (guard (integerp weight)))
+                 `(,subexpr-expr ,weight ,(cl-incf running-total-weight weight)))
+                (_
+                 `(,subexpr 1 ,(cl-incf running-total-weight))))))
+        (push transformed weighted-exprs)
+        (unless (stringp (nth 0 transformed))
+          (setq only-strings nil))))
+    (setq weighted-exprs (nreverse weighted-exprs))
+    ;; Don't bother with compiling to jump tables unless there subexpression
+    ;; count is big enough and the total weight to subexpression count ratio is
+    ;; small.
+    (if (and (nthcdr 2 weighted-exprs)
+             (> 10 (/ running-total-weight (length weighted-exprs))))
+        ;; If all subexpressions are simple strings, there's no need to even
+        ;; build lambdas; just build a vector of strings.
+        (if only-strings
+            `(let ((vec ,(wordgen--build-vector running-total-weight weighted-exprs #'identity)))
+               (aref vec (wordgen-prng-next-int ,(1- running-total-weight) rng)))
+          ;; Not only strings, create a lambda for each non-string
+          ;; subexpression. Avoid creating lambdas for strings, it's a huge
+          ;; waste.
+          `(let* ((vec ,(wordgen--build-vector
+                         running-total-weight
+                         weighted-exprs
+                         (lambda (subexpr)
+                           (if (stringp subexpr)
+                               subexpr
+                             (wordgen--compile-lambda
+                              `(lambda (rules rng)
+                                 ,(wordgen--compile-expression subexpr)))))))
+                  (x (aref vec (wordgen-prng-next-int ,(1- running-total-weight) rng))))
+             (if (stringp x)
+                 (wordgen-print-string x)
+               (funcall x rules rng))))
+      ;; Jump table not worth, compile down to a series of conditionals.
+      ;; TODO: consider compiling down to binary search.
+      `(let ((number (wordgen-prng-next-int ,(1- running-total-weight) rng)))
+         (cond
+          ,@(mapcar
+             (pcase-lambda (`(,expr _ ,limit))
+               `((< number ,limit)
+                 ,(wordgen--compile-expression expr)))
+             weighted-exprs))))))
+
+(defun wordgen--build-vector (length weighted-exprs fn)
+  "Build a vector of LENGTH elements using WEIGHTED-EXPRS.
+
+For each (EXPR WEIGHT . _) element of WEIGHTED-EXPRS, (funcall FN EXPR) appears
+WEIGHT times in the returned vector."
+  (let ((result (make-vector length nil))
+        (i 0))
+    (pcase-dolist (`(,expr ,weight . ,_) weighted-exprs)
+      (let ((fn-expr (funcall fn expr)))
+        (dotimes (_ weight)
+          (aset result i fn-expr)
+          (cl-incf i))))
+    result))
 
 (defun wordgen--compile-function-call (function-call)
   "Compile a builtin FUNCTION-CALL to an Emacs Lisp form."
