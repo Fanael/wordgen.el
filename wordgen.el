@@ -648,7 +648,20 @@ RULES and RNG are passed unchanged to the compiled forms."
 
 (defun wordgen--expr-lisp-call-compile (lisp-call)
   "Compile a LISP-CALL expression to an Emacs Lisp form."
-  `(funcall ,(wordgen--expr-lisp-call-func lisp-call) rules rng))
+  (let* ((type (wordgen--expr-type lisp-call))
+         (predicate (wordgen--expr-type-to-predicate-name type)))
+    `(let ((x (funcall ,(wordgen--expr-lisp-call-func lisp-call) rules rng)))
+       (unless (,predicate x)
+         (error "Lisp call inferred to be of type `%S', but `%S' is nil"
+                ',type ',predicate))
+       x)))
+
+(defun wordgen--expr-type-to-predicate-name (type)
+  "Convert expression TYPE to corresponding Emacs Lisp predicate."
+  (pcase type
+    ('string #'stringp)
+    ('integer #'integerp)
+    (_ (error "Unknown type %S" type))))
 
 
 ;;; PRNG helpers
