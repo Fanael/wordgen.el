@@ -61,7 +61,7 @@ RULESET should be a rule set of the same form as in `wordgen'."
         (`(,rule-name ,rule-expr)
          (when (gethash rule-name rules)
            (error "Redefinition of rule %S" rule-name))
-         (puthash rule-name (wordgen--compile-rule-body rule-expr) rules))
+         (puthash rule-name (wordgen--compile-expression-to-lambda rule-expr) rules))
         (_
          (error "Invalid rule %S" rule))))
     rules))
@@ -122,12 +122,10 @@ RULE-DESC is the rule descriptor to call."
   "If non-nil, compile the generated lambdas to Emacs bytecode.
 Should be t at all times, except when debugging.")
 
-(defun wordgen--compile-lambda-body (body)
-  "Create a lambda with BODY and compile it using `byte-compile'.
-
-Byte-compilation is skipped if `wordgen--compile-to-bytecode' is nil, in which
-case the `lambda' form is returned directly."
-  (let ((lambda* `(lambda (rules rng) ,body)))
+(defun wordgen--compile-expression-to-lambda (expression)
+  "Compile rule body EXPRESSION to an Emacs Lisp function."
+  (let ((func `(lambda (rules rng)
+                 ,(wordgen--compile-expression expression))))
     (if wordgen--compile-to-bytecode
         ;; We have to silence `byte-compile-log-warning' as it can log some
         ;; warnings to *Compile-Log* even though we set `byte-compile-warnings'
@@ -138,13 +136,9 @@ case the `lambda' form is returned directly."
                   (byte-compile-verbose nil)
                   (byte-optimize t)
                   (byte-compile-generate-call-tree nil))
-          (byte-compile lambda*))
+          (byte-compile func))
       ;; Not compiling, just return the lambda.
-      lambda*)))
-
-(defun wordgen--compile-rule-body (expression)
-  "Compile rule body EXPRESSION to an Emacs Lisp function."
-  (wordgen--compile-lambda-body (wordgen--compile-expression expression)))
+      func)))
 
 (defun wordgen--compile-expression (expression)
   "Compile EXPRESSION to an Emacs Lisp form."
@@ -272,7 +266,7 @@ Strings are returned unchanged, other forms are wrapped in a lambda and
 compiled."
   (if (stringp subexpr)
       subexpr
-    (wordgen--compile-lambda-body (wordgen--compile-expression subexpr))))
+    (wordgen--compile-expression-to-lambda subexpr)))
 
 (cl-defsubst wordgen--eval-choice-subexpression (subexpr rules rng)
   "Eval a SUBEXPR compiled by `wordgen--build-choice-subexpression'.
