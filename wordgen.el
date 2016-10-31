@@ -128,8 +128,7 @@ RULESET should be a rule set of the same form as in `wordgen', which see."
                   (wordgen--compile-elisp-to-lambda
                    (wordgen--expr-compile
                     (wordgen--typecheck-rule-body
-                     (wordgen--expr-simplify
-                      (wordgen--parse-expression rule-expr)))))
+                     (wordgen--parse-expression rule-expr))))
                   rules))
         (_
          (error "Invalid rule %S" rule))))
@@ -199,7 +198,6 @@ SLOTS are passed directly to `cl-defstruct'."
          (type (nth 1 name-type))
          (struct-name (intern (concat "wordgen--expr-" (symbol-name name))))
          (type-info-sym (intern (concat (symbol-name struct-name) "-type-info")))
-         (simplify-func-sym (intern (concat (symbol-name struct-name) "-simplify")))
          (expect-type-func-sym (intern (concat (symbol-name struct-name) "-expect-type")))
          (typecheck-children-func-sym
           (intern (concat (symbol-name struct-name) "-typecheck-children")))
@@ -211,7 +209,6 @@ SLOTS are passed directly to `cl-defstruct'."
        (defconst ,type-info-sym
          (list
           (cons 'type ',name)
-          (cons 'simplify-func #',simplify-func-sym)
           (cons 'expect-type-func #',expect-type-func-sym)
           (cons 'typecheck-children-func #',typecheck-children-func-sym)
           (cons 'compile-func #',compile-func-sym)))
@@ -360,72 +357,6 @@ EXPRESSION is the whole (lisp ...) list."
     (_
      (error "Invalid Lisp expression %S: expects 1 argument, %d given"
             expression (length (cdr expression))))))
-
-
-;;; IR-based simplification
-
-;; The simplification is rather, uhm, simple: it mostly handles trivial stuff
-;; like transforming (++ "foo" "bar") into "foobar".
-
-(defun wordgen--expr-simplify (expr)
-  "Simplify EXPR, returning the simplified expression.
-The result is not necessarily `eq' to EXPR."
-  (funcall (cdr (assq 'simplify-func (wordgen--expr-subclass-type-info expr)))
-           expr))
-
-(defalias 'wordgen--expr-integer-simplify #'identity)
-(defalias 'wordgen--expr-string-simplify #'identity)
-(defalias 'wordgen--expr-rule-call-simplify #'identity)
-(defalias 'wordgen--expr-lisp-call-simplify #'identity)
-(defalias 'wordgen--expr-replicate-simplify #'identity)
-(defalias 'wordgen--expr-concat-reeval-simplify #'identity)
-
-(defun wordgen--expr-choice-simplify (choice)
-  "Simplify a CHOICE expression."
-  (pcase (wordgen--expr-choice-children-count choice)
-    ;; [anything] is equivalent to anything.
-    (1 (wordgen--expr-simplify (caar (wordgen--expr-choice-children choice))))
-    (_
-     (dolist (child (wordgen--expr-choice-children choice))
-       (cl-callf wordgen--expr-simplify (car child)))
-     choice)))
-
-(defun wordgen--expr-concat-simplify (concat)
-  "Simplify a CONCAT expression."
-  (pcase (wordgen--expr-concat-children concat)
-    ;; (++) is equivalent to "".
-    ((pred null)
-     (wordgen--expr-string-make "" (wordgen--expr-original-form concat)))
-    ;; (++ anything) is equivalent to anything.
-    ((and children (guard (null (cdr children))))
-     (wordgen--expr-simplify (car children)))
-    (old-children
-     ;; Iterate over children, simplifying them and concatenating any adjacent
-     ;; strings.
-     (let ((new-children '())
-           (pending-strings '()))
-       (cl-flet
-           ((flush-pending-strings
-             ()
-             (when pending-strings
-               (let ((strings (nreverse pending-strings)))
-                 (push (wordgen--expr-string-make
-                        (apply #'concat
-                               (mapcar #'wordgen--expr-string-value strings))
-                        ;; Make up an original form.
-                        `(++ (...)
-                             ,@(mapcar #'wordgen--expr-original-form strings)
-                             (...)))
-                       new-children)))))
-         (dolist (child old-children)
-           (let ((simplified (wordgen--expr-simplify child)))
-             (if (eq 'string (wordgen--expr-subclass-type simplified))
-                 (push simplified pending-strings)
-               (flush-pending-strings)
-               (push simplified new-children))))
-         (flush-pending-strings)
-         (setf (wordgen--expr-concat-children concat) (nreverse new-children))))
-     concat)))
 
 
 ;;; IR-based type checking
