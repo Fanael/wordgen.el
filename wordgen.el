@@ -444,14 +444,14 @@ BYTES should be a sequence of integers."
           (setq word (lsh word 8))
           (setq word (+ word (logand #xFF (elt bytes (+ k (* i 4)))))))
         (aset array i word))
-      (setq i (1+ i)))
+      (cl-incf i))
     ;; No more words in bytes, fill the state using a linear congruential
     ;; generator.
     (let ((seed (if (= i 0) 1 (aref array (1- i)))))
       (while (< i wordgen--prng-array-size)
         (setq seed (logand #xFFFFFFFF (+ 1013904223 (* 1664525 seed))))
         (aset array i seed)
-        (setq i (1+ i))))
+        (cl-incf i)))
     (wordgen--prng-create array)))
 
 (defun wordgen--prng-next-int-small (limit rng)
