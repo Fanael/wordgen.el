@@ -167,6 +167,8 @@ Should be t at all times, except when debugging.")
 Currently it's done by either building a vector of compiled forms and choosing a
 random index, or by turning it into cond, comparing the rolled number against
 consecutive running total weights."
+  (when (= 0 (length vec))
+    (error "Empty choice expression"))
   (let ((weighted-exprs '())
         (running-total-weight 0)
         (only-strings t))
