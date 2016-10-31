@@ -282,6 +282,72 @@ EXPRESSION is the whole (lisp ...) list."
             expression (length (cdr expression))))))
 
 
+;;; IR-based simplification
+
+;; The simplification is rather, uhm, simple: it mostly handles trivial stuff
+;; like transforming (++ "foo" "bar") into "foobar".
+
+(defun wordgen--simplify-expr (expr)
+  "Simplify EXPR, returning the simplified expression.
+The result is not necessarily `eq' to EXPR."
+  (funcall (cdr (assq 'simplify-func (wordgen--expr-subclass-type-info expr)))
+           expr))
+
+(defalias 'wordgen--expr-integer-simplify #'identity)
+(defalias 'wordgen--expr-string-simplify #'identity)
+(defalias 'wordgen--expr-rule-call-simplify #'identity)
+(defalias 'wordgen--expr-lisp-call-simplify #'identity)
+(defalias 'wordgen--expr-replicate-simplify #'identity)
+(defalias 'wordgen--expr-concat-reeval-simplify #'identity)
+
+(defun wordgen--expr-choice-simplify (choice)
+  "Simplify a CHOICE expression."
+  (pcase (wordgen--expr-choice-children-count choice)
+    ;; [anything] is equivalent to anything.
+    (1 (wordgen--simplify-expr (caar (wordgen--expr-choice-children choice))))
+    (_
+     (dolist (child (wordgen--expr-choice-children choice))
+       (cl-callf wordgen--simplify-expr (car child)))
+     choice)))
+
+(defun wordgen--expr-concat-simplify (concat)
+  "Simplify a CONCAT expression."
+  (pcase (wordgen--expr-concat-children concat)
+    ;; (++) is equivalent to "".
+    ((pred null)
+     (wordgen--expr-string-make "" (wordgen--expr-original-form concat)))
+    ;; (++ anything) is equivalent to anything.
+    ((and children (guard (null (cdr children))))
+     (wordgen--simplify-expr (car children)))
+    (old-children
+     ;; Iterate over children, simplifying them and concatenating any adjacent
+     ;; strings.
+     (let ((new-children '())
+           (pending-strings '()))
+       (cl-flet
+           ((flush-pending-strings
+             ()
+             (when pending-strings
+               (let ((strings (nreverse pending-strings)))
+                 (push (wordgen--expr-string-make
+                        (apply #'concat
+                               (mapcar #'wordgen--expr-string-value strings))
+                        ;; Make up an original form.
+                        `(++ (...)
+                             ,@(mapcar #'wordgen--expr-original-form strings)
+                             (...)))
+                       new-children)))))
+         (dolist (child old-children)
+           (let ((simplified (wordgen--simplify-expr child)))
+             (if (eq 'string (wordgen--expr-subclass-type simplified))
+                 (push simplified pending-strings)
+               (flush-pending-strings)
+               (push simplified new-children))))
+         (flush-pending-strings)
+         (setf (wordgen--expr-concat-children concat) (nreverse new-children))))
+     concat)))
+
+
 ;;; Expression compiler
 
 ;; Wordgen code is made executable by converting its expressions to Emacs Lisp
