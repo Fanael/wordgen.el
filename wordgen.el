@@ -522,10 +522,17 @@ instead."
 (defun wordgen--compile-choice-dense (children total-weight)
   "Compile a choice expression into a dense table lookup.
 CHILDREN and TOTAL-WEIGHT are the slots of `wordgen--expr-choice'."
-  (let ((vec (wordgen--build-vector
-              total-weight children #'wordgen--build-choice-subexpression)))
-    `(let ((x (aref ,vec (wordgen-prng-next-int ,(1- total-weight) rng))))
-       (wordgen--eval-choice-subexpression x rules rng))))
+  (let* ((same-type (wordgen--choice-children-same-eval-type-p children))
+         (vec (wordgen--build-vector total-weight children))
+         (aref-form `(aref ,vec (wordgen-prng-next-int ,(1- total-weight) rng))))
+    (pcase same-type
+      ('integer aref-form)
+      ('string `(wordgen-print-string ,aref-form))
+      ('lambda `(funcall ,aref-form rules rng))
+      (_
+       ;; The types are mixed, go through `wordgen--eval-choice-subexpression'.
+       `(let ((x ,aref-form))
+          (wordgen--eval-choice-subexpression x rules rng))))))
 
 (defun wordgen--compile-choice-tiny (children total-weight)
   "Compile a choice expression into a series of conditionals.
@@ -553,36 +560,70 @@ CHILDREN and TOTAL-WEIGHT are the slots of `wordgen--expr-choice'."
     `(wordgen--choice-binary-search
       ,vec (wordgen-prng-next-int ,(1- total-weight) rng) rules rng)))
 
-(defun wordgen--build-vector (length subexprs fn)
+(defun wordgen--build-vector (length subexprs)
   "Build a vector of LENGTH elements using SUBEXPRS.
 
-For each (EXPR WEIGHT . _) element of SUBEXPRS, the result of (funcall FN EXPR)
-appears WEIGHT times in the returned vector."
+For each (EXPR WEIGHT . _) element of SUBEXPRS, the result of
+(`wordgen--build-choice-subexpression' EXPR) appears WEIGHT times in the
+returned vector."
   (let ((result (make-vector length nil))
         (i 0))
     (pcase-dolist (`(,expr ,weight . ,_) subexprs)
-      (let ((fn-expr (funcall fn expr)))
+      (let ((built-expr (wordgen--build-choice-subexpression expr)))
         (dotimes (_ weight)
-          (aset result i fn-expr)
+          (aset result i built-expr)
           (cl-incf i))))
     result))
 
 (defun wordgen--build-choice-subexpression (subexpr)
   "Generate a vector element for a expression SUBEXPR.
 
-Strings are returned unchanged, other forms are wrapped in a lambda and
-compiled."
-  (if (eq 'string (cdr (assq 'type (wordgen--expr-subclass-type-info subexpr))))
-      (wordgen--expr-string-value subexpr)
-    (wordgen--compile-elisp-to-lambda (wordgen--expr-compile subexpr))))
+Strings and integers are returned unchanged, other forms are wrapped in a lambda
+and compiled.
+
+See also `wordgen--eval-choice-subexpression', which evaluates the returned
+object."
+  (pcase (wordgen--expr-subclass-type subexpr)
+    ('string
+     (wordgen--expr-string-value subexpr))
+    ('integer
+     (wordgen--expr-integer-value subexpr))
+    (_
+     (wordgen--compile-elisp-to-lambda (wordgen--expr-compile subexpr)))))
 
 (cl-defsubst wordgen--eval-choice-subexpression (subexpr rules rng)
   "Eval a SUBEXPR compiled by `wordgen--build-choice-subexpression'.
 
 RULES and RNG are passed unchanged to the compiled form."
-  (if (stringp subexpr)
-      (wordgen-print-string subexpr)
-    (funcall subexpr rules rng)))
+  (cond
+   ((stringp subexpr)
+    (wordgen-print-string subexpr))
+   ((integerp subexpr)
+    subexpr)
+   (t
+    (funcall subexpr rules rng))))
+
+(defun wordgen--choice-children-same-eval-type-p (children)
+  "Test whether all CHILDREN of a choice expression are of the same type.
+
+\"Type\" here means the type of the object returned by
+`wordgen--build-choice-subexpression', i.e. it's the type of the Lisp object in
+the vector.
+
+If all CHILDREN are string literals, integer literals, or lambdas, symbols
+'string, 'integer or 'lambda are returned; otherwise, the result is nil."
+  (catch 'return
+    (let (type)
+      (pcase-dolist (`(,child . ,_) children)
+        (let ((child-type (wordgen--expr-subclass-type child)))
+          ;; Not a simple literal.
+          (unless (memq child-type '(string integer))
+            (setq child-type 'lambda))
+          ;; Mixed-type list.
+          (when (and type (not (eq child-type type)))
+            (throw 'return nil))
+          (setq type child-type)))
+      type)))
 
 (defun wordgen--choice-binary-search (vec number rules rng)
   "Find the range in VEC in which NUMBER is, using binary search.
