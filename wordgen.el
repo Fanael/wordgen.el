@@ -533,9 +533,9 @@ CHILDREN and TOTAL-WEIGHT are the slots of `wordgen--expr-choice'."
          (vec (wordgen--build-vector total-weight children))
          (aref-form `(aref ,vec (wordgen-prng-next-int ,(1- total-weight) rng))))
     (pcase same-type
-      ('integer aref-form)
-      ('string `(wordgen-print-string ,aref-form))
-      ('lambda `(funcall ,aref-form rules rng))
+      (`integer aref-form)
+      (`string `(wordgen-print-string ,aref-form))
+      (`lambda `(funcall ,aref-form rules rng))
       (_
        ;; The types are mixed, go through `wordgen--eval-choice-subexpression'.
        ;; Note: this let is actually useful, as it lets the compiler macro on
@@ -549,9 +549,10 @@ CHILDREN and TOTAL-WEIGHT are the slots of `wordgen--expr-choice'."
   `(let ((number (wordgen-prng-next-int ,(1- total-weight) rng)))
      (cond
       ,@(mapcar
-         (pcase-lambda (`(,expr _ ,limit))
-           `((< number ,limit)
-             ,(wordgen--expr-compile expr)))
+         (lambda (child)
+           (pcase-let ((`(,expr _ ,limit) child))
+             `((< number ,limit)
+               ,(wordgen--expr-compile expr))))
          children))))
 
 (defun wordgen--compile-choice-sparse (children total-weight)
@@ -561,10 +562,11 @@ CHILDREN and TOTAL-WEIGHT are the slots of `wordgen--expr-choice'."
          (apply
           #'vector
           (mapcar
-           (pcase-lambda (`(,expr ,weight ,running-weight))
-             (list (- running-weight weight)
-                   running-weight
-                   (wordgen--build-choice-subexpression expr)))
+           (lambda (child)
+             (pcase-let ((`(,expr ,weight ,running-weight) child))
+               (list (- running-weight weight)
+                     running-weight
+                     (wordgen--build-choice-subexpression expr))))
            children))))
     `(wordgen--choice-binary-search
       ,vec (wordgen-prng-next-int ,(1- total-weight) rng) rules rng)))
@@ -593,9 +595,9 @@ and compiled.
 See also `wordgen--eval-choice-subexpression', which evaluates the returned
 object."
   (pcase (wordgen--expr-subclass-type subexpr)
-    ('string
+    (`string
      (wordgen--expr-string-value subexpr))
-    ('integer
+    (`integer
      (wordgen--expr-integer-value subexpr))
     (_
      (wordgen--compile-elisp-to-lambda (wordgen--expr-compile subexpr)))))
@@ -709,8 +711,8 @@ RULES and RNG are passed unchanged to the compiled forms."
 (defun wordgen--expr-type-to-predicate-name (type)
   "Convert expression TYPE to corresponding Emacs Lisp predicate."
   (pcase type
-    ('string #'stringp)
-    ('integer #'integerp)
+    (`string #'stringp)
+    (`integer #'integerp)
     (_ (error "Unknown type %S" type))))
 
 
@@ -734,7 +736,7 @@ When available, uses /dev/urandom."
                            "if=/dev/urandom"
                            (eval-when-compile (concat "bs=" (number-to-string wordgen--prng-optimal-bytes-size)))
                            "count=1"))
-      (0 (buffer-string))
+      (`0 (buffer-string))
       (_ (current-time-string)))))
 
 
