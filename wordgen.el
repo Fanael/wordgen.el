@@ -100,14 +100,7 @@ RULE-NAME is the name of the rule to call."
   (let ((rule-desc (gethash rule-name ruleset)))
     (unless rule-desc
       (error "Rule named %S not found" rule-name))
-    (wordgen--call-rule-by-desc ruleset rng rule-desc)))
-
-(defun wordgen--call-rule-by-desc (ruleset rng rule-desc)
-  "Call a rule using its descriptor.
-RULESET is the rule set we're using.
-RNG is the pseudo-random number generator.
-RULE-DESC is the rule descriptor to call."
-  (funcall rule-desc ruleset rng))
+    (funcall rule-desc ruleset rng)))
 
 
 ;;; Expression compiler
