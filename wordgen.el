@@ -103,6 +103,174 @@ RULE-NAME is the name of the rule to call."
     (funcall rule-desc ruleset rng)))
 
 
+;;; Intermediate representation
+
+;; There's no `:named', because we're doing our own type tagging.
+(cl-defstruct
+    (wordgen--expr
+     (:constructor nil)
+     (:copier nil)
+     (:predicate nil)
+     (:type vector))
+  "Base struct for intermediate representation expression objects."
+  (subclass-type-info :read-only t)
+  (type)
+  (original-form :read-only t))
+
+(defmacro wordgen--define-derived-expr-type (name-type ctor &rest slots)
+  "Define a `cl-defstruct' for a derived IR expression type.
+
+NAME-TYPE is a list (NAME TYPE), where NAME is a symbol used to generate the
+type name by prepending \"wordgen--expr-\"; TYPE is the value to initialize
+`wordgen--expr''s type slot with.
+CTOR is passed directly as `:constructor' to `cl-defstruct'.
+SLOTS are passed directly to `cl-defstruct'."
+  (declare (indent 2) (doc-string 3))
+  (let* ((name (nth 0 name-type))
+         (type (nth 1 name-type))
+         (struct-name (intern (concat "wordgen--expr-" (symbol-name name))))
+         (type-info-sym (intern (concat (symbol-name struct-name) "-type-info")))
+         (simply-func-sym (intern (concat (symbol-name struct-name) "-simplify"))))
+    `(progn
+       (defconst ,type-info-sym
+         ',(list
+            (cons 'name name)
+            (cons 'simplify-func simply-func-sym)))
+       (cl-defstruct
+           (,struct-name
+            (:include wordgen--expr
+                      (subclass-type-info ,type-info-sym)
+                      (type ,type))
+            (:copier nil)
+            (:constructor nil)
+            (:constructor ,@ctor)
+            (:type vector))
+         ,@slots))))
+
+(defun wordgen--simplify-expr (expr)
+  "Simplify EXPR, returning the simplified expression.
+The result is not necessarily `eq' to EXPR."
+  (funcall (cdr (assq 'simplify-func (wordgen--expr-subclass-type-info expr)))
+           expr))
+
+(wordgen--define-derived-expr-type (string 'string)
+    (wordgen--expr-string-make (value original-form))
+  (value :read-only t))
+
+(wordgen--define-derived-expr-type (integer 'integer)
+    (wordgen--expr-integer-make (value original-form))
+  (value :read-only t))
+
+(wordgen--define-derived-expr-type (choice nil)
+    (wordgen--expr-choice-make (children-count total-weight children original-form))
+  "CHILDREN is a list of lists (EXPR WEIGHT RUNNING-WEIGHT).
+CHILDREN is sorted according to RUNNING-WEIGHT, ascending."
+  ;; The children count is trivial to get from the original vector, so store it
+  ;; to avoid calling `length' on lists later.
+  (children-count :read-only t)
+  (total-weight :read-only t)
+  (children :read-only t))
+
+(wordgen--define-derived-expr-type (rule-call nil)
+    (wordgen--expr-rule-call-make (rule-name original-form))
+  (rule-name :read-only t))
+
+(wordgen--define-derived-expr-type (concat 'string)
+    (wordgen--expr-concat-make (children original-form))
+  (children :read-only t))
+
+(wordgen--define-derived-expr-type (replicate 'string)
+    (wordgen--expr-replicate-make (reps subexpr original-form))
+  (reps :read-only t)
+  (subexpr :read-only t))
+
+(wordgen--define-derived-expr-type (concat-reeval 'string)
+    (wordgen--expr-concat-reeval-make (reps subexpr original-form))
+  (reps :read-only t)
+  (subexpr :read-only t))
+
+(wordgen--define-derived-expr-type (lisp-call nil)
+    (wordgen--expr-lisp-call-make (func original-form))
+  (func :read-only t))
+
+(defun wordgen--parse-expression (expression)
+  "Compile wordgen EXPRESSION to intermediate representation."
+  (pcase expression
+    ((pred stringp) (wordgen--parse-string expression))
+    ((pred integerp) (wordgen--parse-integer expression))
+    ((pred vectorp) (wordgen--parse-choice-expr expression))
+    ((pred symbolp) (wordgen--parse-rule-call expression))
+    (`(++ . ,_) (wordgen--parse-concat expression))
+    (`(replicate . ,_) (wordgen--parse-replicate expression))
+    (`(eval-multiple-times . ,_) (wordgen--parse-concat-reeval expression))
+    (`(lisp . ,_) (wordgen--parse-lisp-call expression))
+    (_ (error "Invalid expression %S" expression))))
+
+(defun wordgen--parse-string (string)
+  "Compile a STRING literal to intermediate representation."
+  (wordgen--expr-string-make string string))
+
+(defun wordgen--parse-integer (integer)
+  "Compile an INTEGER literal to intermediate representation."
+  (wordgen--expr-integer-make integer integer))
+
+(defun wordgen--parse-choice-expr (vec)
+  "Compile a choice expression VEC to intermediate representation."
+  (let ((children-count (length vec))
+        (children '())
+        (running-total-weight 0))
+    (dotimes (i children-count)
+      (let ((child (aref vec i)))
+        (push (pcase child
+                ((and `(,weight ,child-expr)
+                      (guard (integerp weight)))
+                 `(,child-expr ,weight ,(cl-incf running-total-weight weight)))
+                (_
+                 `(,child 1 ,(cl-incf running-total-weight))))
+              children)))
+    (wordgen--expr-choice-make
+     children-count running-total-weight (nreverse children) vec)))
+
+(defun wordgen--parse-rule-call (rule)
+  "Compile a RULE call to intermediate representation."
+  (wordgen--expr-rule-call-make rule rule))
+
+(defun wordgen--parse-concat (expression)
+  "Compile a concat expression to intermediate representation.
+EXPRESSION is the whole (++ ...) list."
+  (wordgen--expr-concat-make (cdr expression) expression))
+
+(defun wordgen--parse-replicate (expression)
+  "Compile a replicate expression to intermediate representation.
+EXPRESSION is the whole (replicate ...) list."
+  (pcase (cdr expression)
+    (`(,reps ,child)
+     (wordgen--expr-replicate-make reps child expression))
+    (_
+     (error "Invalid replicate expression %S: expects 2 arguments, %d given"
+            expression (length (cdr expression))))))
+
+(defun wordgen--parse-concat-reeval (expression)
+  "Compile a concat-reeval expression to intermediate representation.
+EXPRESSION is the whole (eval-multiple-times ...) list."
+  (pcase (cdr expression)
+    (`(,reps ,child)
+     (wordgen--expr-concat-reeval-make reps child expression))
+    (_
+     (error "Invalid concat-reeval expression %S: expects 2 arguments, %d given"
+            expression (length (cdr expression))))))
+
+(defun wordgen--parse-lisp-call (expression)
+  "Compile a list function call expression to intermediate representation.
+EXPRESSION is the whole (lisp ...) list."
+  (pcase (cdr expression)
+    (`(,func)
+     (wordgen--expr-lisp-call-make func expression))
+    (_
+     (error "Invalid lisp expression %S: expects 1 argument, %d given"
+            expression (length (cdr expression))))))
+
+
 ;;; Expression compiler
 
 ;; Wordgen code is made executable by converting its expressions to Emacs Lisp
