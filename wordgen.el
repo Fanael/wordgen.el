@@ -531,6 +531,8 @@ CHILDREN and TOTAL-WEIGHT are the slots of `wordgen--expr-choice'."
       ('lambda `(funcall ,aref-form rules rng))
       (_
        ;; The types are mixed, go through `wordgen--eval-choice-subexpression'.
+       ;; Note: this let is actually useful, as it lets the compiler macro on
+       ;; `wordgen--eval-choice-subexpression' generate optimal bytecode.
        `(let ((x ,aref-form))
           (wordgen--eval-choice-subexpression x rules rng))))))
 
