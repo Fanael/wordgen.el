@@ -214,12 +214,12 @@ SUBEXPRS is sorted according to RUNNING-WEIGHT, ascending."
 
 SUBEXPRS and TOTAL-WEIGHT are the results of
 `wordgen--normalize-choice-subexpressions', which see."
-  `(let* ((vec ,(wordgen--build-vector
-                 total-weight subexprs #'wordgen--build-choice-subexpression))
-          (x (aref vec (wordgen-prng-next-int ,(1- total-weight) rng))))
-     (if (stringp x)
-         (wordgen-print-string x)
-       (funcall x rules rng))))
+  (let ((vec (wordgen--build-vector
+              total-weight subexprs #'wordgen--build-choice-subexpression)))
+    `(let ((x (aref ,vec (wordgen-prng-next-int ,(1- total-weight) rng))))
+       (if (stringp x)
+           (wordgen-print-string x)
+         (funcall x rules rng)))))
 
 (defun wordgen--compile-choice-tiny (subexprs total-weight)
   "Compile a choice expression into a series of conditionals.
@@ -239,16 +239,17 @@ SUBEXPRS and TOTAL-WEIGHT are the results of
 
 SUBEXPRS and TOTAL-WEIGHT are the results of
 `wordgen--normalize-choice-subexpressions', which see."
-  `(let ((vec ,(apply
-                #'vector
-                (mapcar
-                 (pcase-lambda (`(,expr ,weight ,running-weight))
-                   (list (- running-weight weight)
-                         running-weight
-                         (wordgen--build-choice-subexpression expr)))
-                 subexprs)))
-         (number (wordgen-prng-next-int ,(1- total-weight) rng)))
-     (wordgen--choice-binary-search vec number rules rng)))
+  (let ((vec
+         (apply
+          #'vector
+          (mapcar
+           (pcase-lambda (`(,expr ,weight ,running-weight))
+             (list (- running-weight weight)
+                   running-weight
+                   (wordgen--build-choice-subexpression expr)))
+           subexprs))))
+    `(wordgen--choice-binary-search
+      ,vec (wordgen-prng-next-int ,(1- total-weight) rng) rules rng)))
 
 (defun wordgen--build-vector (length subexprs fn)
   "Build a vector of LENGTH elements using SUBEXPRS.
