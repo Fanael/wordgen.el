@@ -81,10 +81,10 @@ EXPRESSION can be one of the following:
    then returns a string of EXPR repeated TIMES times. For example:
    \(replicate 3 \"foo\") evaluates to \"foofoofoo\".
 
- * A list (eval-multiple-times TIMES EXPR), which evaluates the expression
+ * A list (concat-reeval TIMES EXPR), which evaluates the expression
    TIMES, then evaluates EXPR TIMES times, concatenating the results. For
    example:
-   \(eval-multiple-times 2 [\"a\" \"b\"]) may evaluate to \"aa\", \"ab\", \"ba\"
+   \(concat-reeval 2 [\"a\" \"b\"]) may evaluate to \"aa\", \"ab\", \"ba\"
    or \"bb\".
 
  * A list (lisp FUNC), where FUNC is an expression evaluating to a Lisp
@@ -279,7 +279,7 @@ CHILDREN is sorted according to RUNNING-WEIGHT, ascending."
     ((pred symbolp) (wordgen--parse-rule-call expression))
     (`(++ . ,_) (wordgen--parse-concat expression))
     (`(replicate . ,_) (wordgen--parse-replicate expression))
-    (`(eval-multiple-times . ,_) (wordgen--parse-concat-reeval expression))
+    (`(concat-reeval . ,_) (wordgen--parse-concat-reeval expression))
     (`(lisp . ,_) (wordgen--parse-lisp-call expression))
     (_ (error "Invalid expression %S" expression))))
 
@@ -340,7 +340,7 @@ EXPRESSION is the whole (replicate ...) list."
 
 (defun wordgen--parse-concat-reeval (expression)
   "Compile a concat-reeval expression to intermediate representation.
-EXPRESSION is the whole (eval-multiple-times ...) list."
+EXPRESSION is the whole (concat-reeval ...) list."
   (pcase (cdr expression)
     (`(,reps ,child)
      (wordgen--expr-concat-reeval-make
