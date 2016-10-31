@@ -122,26 +122,29 @@ RULE-DESC is the rule descriptor to call."
   "If non-nil, compile the generated lambdas to Emacs bytecode.
 Should be t at all times, except when debugging.")
 
-(defun wordgen--compile-lambda (lambda*)
-  (if wordgen--compile-to-bytecode
-      ;; We have to silence `byte-compile-log-warning' as it can log some
-      ;; warnings to *Compile-Log* even though we set `byte-compile-warnings'
-      ;; to nil.
-      (cl-letf (((symbol-function #'byte-compile-log-warning) #'ignore)
-                (lexical-binding t)
-                (byte-compile-warnings nil)
-                (byte-compile-verbose nil)
-                (byte-optimize t)
-                (byte-compile-generate-call-tree nil))
-        (byte-compile lambda*))
-    ;; Not compiling, just return the lambda.
-    lambda*))
+(defun wordgen--compile-lambda-body (body)
+  "Create a lambda with BODY and compile it using `byte-compile'.
+
+Byte-compilation is skipped if `wordgen--compile-to-bytecode' is nil, in which
+case the `lambda' form is returned directly."
+  (let ((lambda* `(lambda (rules rng) ,body)))
+    (if wordgen--compile-to-bytecode
+        ;; We have to silence `byte-compile-log-warning' as it can log some
+        ;; warnings to *Compile-Log* even though we set `byte-compile-warnings'
+        ;; to nil.
+        (cl-letf (((symbol-function #'byte-compile-log-warning) #'ignore)
+                  (lexical-binding t)
+                  (byte-compile-warnings nil)
+                  (byte-compile-verbose nil)
+                  (byte-optimize t)
+                  (byte-compile-generate-call-tree nil))
+          (byte-compile lambda*))
+      ;; Not compiling, just return the lambda.
+      lambda*)))
 
 (defun wordgen--compile-rule-body (expression)
   "Compile rule body EXPRESSION to an Emacs Lisp function."
-  (let ((func `(lambda (rules rng)
-                 ,(wordgen--compile-expression expression))))
-    (wordgen--compile-lambda func)))
+  (wordgen--compile-lambda-body (wordgen--compile-expression expression)))
 
 (defun wordgen--compile-expression (expression)
   "Compile EXPRESSION to an Emacs Lisp form."
@@ -164,9 +167,11 @@ Should be t at all times, except when debugging.")
 (defun wordgen--compile-choice-expr (vec)
   "Compile choice expression VEC to an Emacs Lisp form.
 
-Currently it's done by either building a vector of compiled forms and choosing a
-random index, or by turning it into cond, comparing the rolled number against
-consecutive running total weights."
+It's done by either building a vector of compiled forms and choosing a random
+index (when the elements' weights are dense enough), by building a sorted vector
+of ranges and binary-searching for a random number (when the weights are
+sparse), or by turning it into cond, comparing the rolled number against
+consecutive running total weights (when there are very few elements)."
   (when (= 0 (length vec))
     (error "Empty choice expression"))
   (let ((weighted-exprs '())
@@ -186,10 +191,12 @@ consecutive running total weights."
         (push transformed weighted-exprs)
         (unless (stringp (nth 0 transformed))
           (setq only-strings nil))))
+    ;; Reverse the list so that elements are sorted by ascending RUNNING-WEIGHT.
     (setq weighted-exprs (nreverse weighted-exprs))
-    ;; Don't bother with compiling to jump tables unless there subexpression
-    ;; count is big enough and the total weight to subexpression count ratio is
-    ;; small.
+    ;; Don't bother with compiling to jump tables unless the subexpression count
+    ;; is big enough and the total weight to subexpression count ratio is small,
+    ;; otherwise we either gain nothing or end up with a giant array with only a
+    ;; few different elements.
     (if (and (nthcdr 2 weighted-exprs)
              (> 10 (/ running-total-weight (length weighted-exprs))))
         ;; If all subexpressions are simple strings, there's no need to even
@@ -201,33 +208,40 @@ consecutive running total weights."
           ;; subexpression. Avoid creating lambdas for strings, it's a huge
           ;; waste.
           `(let* ((vec ,(wordgen--build-vector
-                         running-total-weight
-                         weighted-exprs
-                         (lambda (subexpr)
-                           (if (stringp subexpr)
-                               subexpr
-                             (wordgen--compile-lambda
-                              `(lambda (rules rng)
-                                 ,(wordgen--compile-expression subexpr)))))))
+                         running-total-weight weighted-exprs #'wordgen--build-choice-subexpression))
                   (x (aref vec (wordgen-prng-next-int ,(1- running-total-weight) rng))))
              (if (stringp x)
                  (wordgen-print-string x)
                (funcall x rules rng))))
-      ;; Jump table not worth, compile down to a series of conditionals.
-      ;; TODO: consider compiling down to binary search.
-      `(let ((number (wordgen-prng-next-int ,(1- running-total-weight) rng)))
-         (cond
-          ,@(mapcar
-             (pcase-lambda (`(,expr _ ,limit))
-               `((< number ,limit)
-                 ,(wordgen--compile-expression expr)))
-             weighted-exprs))))))
+      ;; Jump table not worth it, compile down to a series of conditionals if
+      ;; there are few subexpression, otherwise use binary search.
+      (if (null (nthcdr 5 weighted-exprs))
+          `(let ((number (wordgen-prng-next-int ,(1- running-total-weight) rng)))
+             (cond
+              ,@(mapcar
+                 (pcase-lambda (`(,expr _ ,limit))
+                   `((< number ,limit)
+                     ,(wordgen--compile-expression expr)))
+                 weighted-exprs)))
+        ;; There are enough subexpressions for binary search to be worth it.
+        ;; Build a vector of (BEGIN END FORM) and search on it.
+        ;; Note: no sort, `weighted-exprs' is already sorted on RUNNING-WEIGHT.
+        `(let ((vec ,(apply
+                      #'vector
+                      (mapcar
+                       (pcase-lambda (`(,expr ,weight ,running-weight))
+                         (list (- running-weight weight)
+                               running-weight
+                               (wordgen--build-choice-subexpression expr)))
+                       weighted-exprs)))
+               (number (wordgen-prng-next-int ,(1- running-total-weight) rng)))
+           (wordgen--choice-binary-search vec number rules rng))))))
 
 (defun wordgen--build-vector (length weighted-exprs fn)
   "Build a vector of LENGTH elements using WEIGHTED-EXPRS.
 
-For each (EXPR WEIGHT . _) element of WEIGHTED-EXPRS, (funcall FN EXPR) appears
-WEIGHT times in the returned vector."
+For each (EXPR WEIGHT . _) element of WEIGHTED-EXPRS, the result of (funcall FN
+EXPR) appears WEIGHT times in the returned vector."
   (let ((result (make-vector length nil))
         (i 0))
     (pcase-dolist (`(,expr ,weight . ,_) weighted-exprs)
@@ -236,6 +250,43 @@ WEIGHT times in the returned vector."
           (aset result i fn-expr)
           (cl-incf i))))
     result))
+
+(defun wordgen--build-choice-subexpression (subexpr)
+  "Generate a vector element for a expression SUBEXPR.
+
+Strings are returned unchanged, other forms are wrapped in a lambda and
+compiled."
+  (if (stringp subexpr)
+      subexpr
+    (wordgen--compile-lambda-body (wordgen--compile-expression subexpr))))
+
+(defun wordgen--choice-binary-search (vec number rules rng)
+  "Find the range in VEC in which NUMBER is, using binary search.
+
+VEC is a sorted vector of (BEGIN END FORM), where [BEGIN..END) is a numeric
+range and FORM is its corresponding compiled form returned from
+`wordgen--build-choice-subexpression'.
+
+RULES and RNG are passed unchanged to the compiled forms."
+  (catch 'return
+    (let ((low 0)
+          (high (length vec)))
+      (while t
+        (let* ((half (+ low (/ (- high low) 2)))
+               (guess (aref vec half))
+               (guess-low (nth 0 guess)))
+          (cond
+           ((and (<= guess-low number)
+                 (< number (nth 1 guess)))
+            (let ((form (nth 2 guess)))
+              (throw 'return
+                     (if (stringp form)
+                         (wordgen-print-string form)
+                       (funcall form rules rng)))))
+           ((> guess-low number)
+            (setq high half))
+           (t
+            (setq low (1+ half)))))))))
 
 (defun wordgen--compile-function-call (function-call)
   "Compile a builtin FUNCTION-CALL to an Emacs Lisp form."
