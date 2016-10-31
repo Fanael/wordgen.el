@@ -174,78 +174,90 @@ sparse), or by turning it into cond, comparing the rolled number against
 consecutive running total weights (when there are very few elements)."
   (when (= 0 (length vec))
     (error "Empty choice expression"))
-  (let ((weighted-exprs '())
-        (running-total-weight 0)
-        (only-strings t))
-    ;; First, transform each subexpression into a list of the form
-    ;; (EXPR WEIGHT RUNNING-WEIGHT)
+  (pcase-let ((`(,total-weight . ,subexprs)
+               (wordgen--normalize-choice-subexpressions vec)))
+    ;; We have three strategies available to us.
+    ;; * lookup table: used when the weights are relatively dense.
+    ;; * binary search: used when the weights are sparse.
+    ;; * cond-based linear search: used when the are few subexpressions.
+    ;; The conditions used here are mere heuristics that work good enough.
+    (cond
+     ((and (nthcdr 2 subexprs)
+           (> 10 (/ total-weight (length vec))))
+      (wordgen--compile-choice-dense subexprs total-weight))
+     ((nthcdr 5 subexprs)
+      (wordgen--compile-choice-sparse subexprs total-weight))
+     (t
+      (wordgen--compile-choice-tiny subexprs total-weight)))))
+
+(defun wordgen--normalize-choice-subexpressions (vec)
+  "Transform the choice expression VEC into more usable form.
+
+The returned value is (TOTAL-WEIGHT . SUBEXPRS).
+SUBEXPRS is a list of lists (EXPR WEIGHT RUNNING-WEIGHT).
+SUBEXPRS is sorted according to RUNNING-WEIGHT, ascending."
+  (let ((subexprs '())
+        (running-total-weight 0))
     (dotimes (i (length vec))
-      (let* ((subexpr (aref vec i))
-             (transformed
-              (pcase subexpr
+      (let ((subexpr (aref vec i)))
+        (push (pcase subexpr
                 ((and `(,weight ,subexpr-expr)
                       (guard (integerp weight)))
                  `(,subexpr-expr ,weight ,(cl-incf running-total-weight weight)))
                 (_
-                 `(,subexpr 1 ,(cl-incf running-total-weight))))))
-        (push transformed weighted-exprs)
-        (unless (stringp (nth 0 transformed))
-          (setq only-strings nil))))
-    ;; Reverse the list so that elements are sorted by ascending RUNNING-WEIGHT.
-    (setq weighted-exprs (nreverse weighted-exprs))
-    ;; Don't bother with compiling to jump tables unless the subexpression count
-    ;; is big enough and the total weight to subexpression count ratio is small,
-    ;; otherwise we either gain nothing or end up with a giant array with only a
-    ;; few different elements.
-    (if (and (nthcdr 2 weighted-exprs)
-             (> 10 (/ running-total-weight (length weighted-exprs))))
-        ;; If all subexpressions are simple strings, there's no need to even
-        ;; build lambdas; just build a vector of strings.
-        (if only-strings
-            `(let ((vec ,(wordgen--build-vector running-total-weight weighted-exprs #'identity)))
-               (wordgen-print-string
-                (aref vec (wordgen-prng-next-int ,(1- running-total-weight) rng))))
-          ;; Not only strings, create a lambda for each non-string
-          ;; subexpression. Avoid creating lambdas for strings, it's a huge
-          ;; waste.
-          `(let* ((vec ,(wordgen--build-vector
-                         running-total-weight weighted-exprs #'wordgen--build-choice-subexpression))
-                  (x (aref vec (wordgen-prng-next-int ,(1- running-total-weight) rng))))
-             (if (stringp x)
-                 (wordgen-print-string x)
-               (funcall x rules rng))))
-      ;; Jump table not worth it, compile down to a series of conditionals if
-      ;; there are few subexpression, otherwise use binary search.
-      (if (null (nthcdr 5 weighted-exprs))
-          `(let ((number (wordgen-prng-next-int ,(1- running-total-weight) rng)))
-             (cond
-              ,@(mapcar
-                 (pcase-lambda (`(,expr _ ,limit))
-                   `((< number ,limit)
-                     ,(wordgen--compile-expression expr)))
-                 weighted-exprs)))
-        ;; There are enough subexpressions for binary search to be worth it.
-        ;; Build a vector of (BEGIN END FORM) and search on it.
-        ;; Note: no sort, `weighted-exprs' is already sorted on RUNNING-WEIGHT.
-        `(let ((vec ,(apply
-                      #'vector
-                      (mapcar
-                       (pcase-lambda (`(,expr ,weight ,running-weight))
-                         (list (- running-weight weight)
-                               running-weight
-                               (wordgen--build-choice-subexpression expr)))
-                       weighted-exprs)))
-               (number (wordgen-prng-next-int ,(1- running-total-weight) rng)))
-           (wordgen--choice-binary-search vec number rules rng))))))
+                 `(,subexpr 1 ,(cl-incf running-total-weight))))
+              subexprs)))
+    (list running-total-weight (nreverse subexprs))))
 
-(defun wordgen--build-vector (length weighted-exprs fn)
-  "Build a vector of LENGTH elements using WEIGHTED-EXPRS.
+(defun wordgen--compile-choice-dense (subexprs total-weight)
+  "Compile a choice expression into a dense table lookup.
 
-For each (EXPR WEIGHT . _) element of WEIGHTED-EXPRS, the result of (funcall FN
-EXPR) appears WEIGHT times in the returned vector."
+SUBEXPRS and TOTAL-WEIGHT are the results of
+`wordgen--normalize-choice-subexpressions', which see."
+  `(let* ((vec ,(wordgen--build-vector
+                 total-weight subexprs #'wordgen--build-choice-subexpression))
+          (x (aref vec (wordgen-prng-next-int ,(1- total-weight) rng))))
+     (if (stringp x)
+         (wordgen-print-string x)
+       (funcall x rules rng))))
+
+(defun wordgen--compile-choice-tiny (subexprs total-weight)
+  "Compile a choice expression into a series of conditionals.
+
+SUBEXPRS and TOTAL-WEIGHT are the results of
+`wordgen--normalize-choice-subexpressions', which see."
+  `(let ((number (wordgen-prng-next-int ,(1- total-weight) rng)))
+     (cond
+      ,@(mapcar
+         (pcase-lambda (`(,expr _ ,limit))
+           `((< number ,limit)
+             ,(wordgen--compile-expression expr)))
+         subexprs))))
+
+(defun wordgen--compile-choice-sparse (subexprs total-weight)
+  "Compile a choice expression into binary search.
+
+SUBEXPRS and TOTAL-WEIGHT are the results of
+`wordgen--normalize-choice-subexpressions', which see."
+  `(let ((vec ,(apply
+                #'vector
+                (mapcar
+                 (pcase-lambda (`(,expr ,weight ,running-weight))
+                   (list (- running-weight weight)
+                         running-weight
+                         (wordgen--build-choice-subexpression expr)))
+                 subexprs)))
+         (number (wordgen-prng-next-int ,(1- total-weight) rng)))
+     (wordgen--choice-binary-search vec number rules rng)))
+
+(defun wordgen--build-vector (length subexprs fn)
+  "Build a vector of LENGTH elements using SUBEXPRS.
+
+For each (EXPR WEIGHT . _) element of SUBEXPRS, the result of (funcall FN EXPR)
+appears WEIGHT times in the returned vector."
   (let ((result (make-vector length nil))
         (i 0))
-    (pcase-dolist (`(,expr ,weight . ,_) weighted-exprs)
+    (pcase-dolist (`(,expr ,weight . ,_) subexprs)
       (let ((fn-expr (funcall fn expr)))
         (dotimes (_ weight)
           (aset result i fn-expr)
