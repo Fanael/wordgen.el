@@ -44,7 +44,70 @@
 
 ;;;###autoload
 (cl-defun wordgen (ruleset &key (word-count 1) (starting-rule nil) (seed nil))
-  ""
+  "Generate random words using rules described in RULESET.
+
+The result is a list of WORD-COUNT random words.
+Each word is the result of evaluation of STARTING-RULE.
+The default STARTING-RULE is `result'.
+
+SEED is a sequence of integers (a string, a list of integers, etc.) used to
+initialize the pseudo-random number generator. When nil, a default seed is
+obtained from /dev/urandom or, if that fails, from the current time.
+
+RULESET is a list of lists of the form (RULE-NAME EXPRESSION), where RULE-NAME
+is a symbol.
+Rules always evaluate to a string.
+
+EXPRESSION can be one of the following:
+ * A symbol RULE-NAME, which evaluates the rule named RULE-NAME and returns its
+   result.
+
+ * An integer, which evaluates to itself.
+
+ * A string, which evaluates to itself.
+
+ * A vector [CHOICE-ELEMENT ...], which randomly chooses one of its elements and
+   evaluates it.
+
+   CHOICE-ELEMENT can be either a list (WEIGHT EXPRESSION), or just an
+   EXPRESSION. In the latter case, the WEIGHT is assumed to be 1.
+   WEIGHT is an integer used to control the probability of picking an element:
+   P(element) = P(weight) / P(sum of all weights).
+
+ * A list (++ EXPR-1 EXPR-2 ... EXPR-N), which evaluates all its arguments from
+   left to right and concatenates the results.
+
+ * A list (replicate TIMES EXPR), which evaluates expressions TIMES and EXPR,
+   then returns a string of EXPR repeated TIMES times. For example:
+   \(replicate 3 \"foo\") evaluates to \"foofoofoo\".
+
+ * A list (eval-multiple-times TIMES EXPR), which evaluates the expression
+   TIMES, then evaluates EXPR TIMES times, concatenating the results. For
+   example:
+   \(eval-multiple-times 2 [\"a\" \"b\"]) may evaluate to \"aa\", \"ab\", \"ba\"
+   or \"bb\".
+
+ * A list (lisp FUNC), where FUNC is an expression evaluating to a Lisp
+   function. The function is called with two arguments (RULES RNG), where RULES
+   is the compiled RULESET as returned by `wordgen-compile-ruleset' and RNG is
+   an instance of the pseudo-random number generator that can be passed to
+   `wordgen-prng-next-int'.
+   It's likely a bad idea to pass a `lambda' as FUNC, because FUNC is copied
+   straight into generated Emacs Lisp code, so the `lambda' will be compiled
+   during RULESET compilation using `wordgen's internal settings. In particular,
+   this means `lexical-binding' set to t.
+   To be safe, store the `lambda' in a variable first and pass the variable name
+   here.
+   To return a string back to `wordgen' code, use `wordgen-print-string' instead
+   of returning the string directly.
+   To get a string from `wordgen-call-rule-by-name', use
+   `wordgen-with-output-to-string'.
+
+Any other EXPRESSION is unrecognized and results in an error being signaled at
+RULESET compilation time.
+
+Type errors, like (replicate \"foo\" 3) or (++ \"foo\" 10), also result in an
+error being signaled during RULESET compilation."
   (let ((compiled-ruleset (wordgen-compile-ruleset ruleset))
         (rng (wordgen--prng-create-from-bytes (or seed (wordgen--get-default-seed))))
         (result '()))
@@ -54,7 +117,7 @@
 
 (defun wordgen-compile-ruleset (ruleset)
   "Compile RULESET to executable form.
-RULESET should be a rule set of the same form as in `wordgen'."
+RULESET should be a rule set of the same form as in `wordgen', which see."
   (let ((rules (make-hash-table :test #'eq)))
     (dolist (rule ruleset)
       (pcase rule
@@ -566,7 +629,7 @@ CHILDREN and TOTAL-WEIGHT are the slots of `wordgen--expr-choice'."
   "Build a vector of LENGTH elements using SUBEXPRS.
 
 For each (EXPR WEIGHT . _) element of SUBEXPRS, the result of
-(`wordgen--build-choice-subexpression' EXPR) appears WEIGHT times in the
+\(`wordgen--build-choice-subexpression' EXPR) appears WEIGHT times in the
 returned vector."
   (let ((result (make-vector length nil))
         (i 0))
