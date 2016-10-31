@@ -289,13 +289,13 @@ EXPRESSION is the whole (eval-multiple-times ...) list."
             expression (length (cdr expression))))))
 
 (defun wordgen--parse-lisp-call (expression)
-  "Compile a list function call expression to intermediate representation.
+  "Compile a Lisp function call expression to intermediate representation.
 EXPRESSION is the whole (lisp ...) list."
   (pcase (cdr expression)
     (`(,func)
      (wordgen--expr-lisp-call-make func expression))
     (_
-     (error "Invalid lisp expression %S: expects 1 argument, %d given"
+     (error "Invalid Lisp expression %S: expects 1 argument, %d given"
             expression (length (cdr expression))))))
 
 
