@@ -132,10 +132,13 @@ SLOTS are passed directly to `cl-defstruct'."
          (type-info-sym (intern (concat (symbol-name struct-name) "-type-info")))
          (simply-func-sym (intern (concat (symbol-name struct-name) "-simplify"))))
     `(progn
+       ;; We could build the alist at macro expansion time instead, but leaving
+       ;; it to runtime means we can sharp-quote the function names, so the byte
+       ;; compiler will warn if a function is not defined.
        (defconst ,type-info-sym
-         ',(list
-            (cons 'name name)
-            (cons 'simplify-func simply-func-sym)))
+         (list
+          (cons 'type ',name)
+          (cons 'simplify-func #',simply-func-sym)))
        (cl-defstruct
            (,struct-name
             (:include wordgen--expr
@@ -147,11 +150,9 @@ SLOTS are passed directly to `cl-defstruct'."
             (:type vector))
          ,@slots))))
 
-(defun wordgen--simplify-expr (expr)
-  "Simplify EXPR, returning the simplified expression.
-The result is not necessarily `eq' to EXPR."
-  (funcall (cdr (assq 'simplify-func (wordgen--expr-subclass-type-info expr)))
-           expr))
+(defun wordgen--expr-subclass-type (expr)
+  "Get the type tag of EXPR."
+  (cdr (assq 'type (wordgen--expr-subclass-type-info expr))))
 
 (wordgen--define-derived-expr-type (string 'string)
     (wordgen--expr-string-make (value original-form))
@@ -228,6 +229,9 @@ CHILDREN is sorted according to RUNNING-WEIGHT, ascending."
                 (_
                  `(,child 1 ,(cl-incf running-total-weight))))
               children)))
+    ;; Actually compile the children now.
+    (dolist (child children)
+      (cl-callf wordgen--parse-expression (car child)))
     (wordgen--expr-choice-make
      children-count running-total-weight (nreverse children) vec)))
 
@@ -238,14 +242,18 @@ CHILDREN is sorted according to RUNNING-WEIGHT, ascending."
 (defun wordgen--parse-concat (expression)
   "Compile a concat expression to intermediate representation.
 EXPRESSION is the whole (++ ...) list."
-  (wordgen--expr-concat-make (cdr expression) expression))
+  (wordgen--expr-concat-make (mapcar #'wordgen--parse-expression (cdr expression))
+                             expression))
 
 (defun wordgen--parse-replicate (expression)
   "Compile a replicate expression to intermediate representation.
 EXPRESSION is the whole (replicate ...) list."
   (pcase (cdr expression)
     (`(,reps ,child)
-     (wordgen--expr-replicate-make reps child expression))
+     (wordgen--expr-replicate-make
+      (wordgen--parse-expression reps)
+      (wordgen--parse-expression child)
+      expression))
     (_
      (error "Invalid replicate expression %S: expects 2 arguments, %d given"
             expression (length (cdr expression))))))
@@ -255,7 +263,10 @@ EXPRESSION is the whole (replicate ...) list."
 EXPRESSION is the whole (eval-multiple-times ...) list."
   (pcase (cdr expression)
     (`(,reps ,child)
-     (wordgen--expr-concat-reeval-make reps child expression))
+     (wordgen--expr-concat-reeval-make
+      (wordgen--parse-expression reps)
+      (wordgen--parse-expression child)
+      expression))
     (_
      (error "Invalid concat-reeval expression %S: expects 2 arguments, %d given"
             expression (length (cdr expression))))))
