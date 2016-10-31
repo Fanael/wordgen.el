@@ -217,6 +217,8 @@ CHILDREN is sorted according to RUNNING-WEIGHT, ascending."
 
 (defun wordgen--parse-choice-expr (vec)
   "Compile a choice expression VEC to intermediate representation."
+  (when (= 0 (length vec))
+    (error "Empty choice expression"))
   (let ((children-count (length vec))
         (children '())
         (running-total-weight 0))
@@ -225,6 +227,8 @@ CHILDREN is sorted according to RUNNING-WEIGHT, ascending."
         (push (pcase child
                 ((and `(,weight ,child-expr)
                       (guard (integerp weight)))
+                 (when (<= weight 0)
+                   (error "Weight %d is not positive" weight))
                  `(,child-expr ,weight ,(cl-incf running-total-weight weight)))
                 (_
                  `(,child 1 ,(cl-incf running-total-weight))))
