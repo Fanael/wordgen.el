@@ -203,7 +203,8 @@ consecutive running total weights (when there are very few elements)."
         ;; build lambdas; just build a vector of strings.
         (if only-strings
             `(let ((vec ,(wordgen--build-vector running-total-weight weighted-exprs #'identity)))
-               (aref vec (wordgen-prng-next-int ,(1- running-total-weight) rng)))
+               (wordgen-print-string
+                (aref vec (wordgen-prng-next-int ,(1- running-total-weight) rng))))
           ;; Not only strings, create a lambda for each non-string
           ;; subexpression. Avoid creating lambdas for strings, it's a huge
           ;; waste.
