@@ -61,7 +61,13 @@ RULESET should be a rule set of the same form as in `wordgen'."
         (`(,rule-name ,rule-expr)
          (when (gethash rule-name rules)
            (error "Redefinition of rule %S" rule-name))
-         (puthash rule-name (wordgen--compile-expression-to-lambda rule-expr) rules))
+         (puthash rule-name
+                  (wordgen--compile-elisp-to-lambda
+                   (wordgen--expr-compile
+                    (wordgen--typecheck-rule-body
+                     (wordgen--expr-simplify
+                      (wordgen--parse-expression rule-expr)))))
+                  rules))
         (_
          (error "Invalid rule %S" rule))))
     rules))
@@ -133,7 +139,8 @@ SLOTS are passed directly to `cl-defstruct'."
          (simplify-func-sym (intern (concat (symbol-name struct-name) "-simplify")))
          (expect-type-func-sym (intern (concat (symbol-name struct-name) "-expect-type")))
          (typecheck-children-func-sym
-          (intern (concat (symbol-name struct-name) "-typecheck-children"))))
+          (intern (concat (symbol-name struct-name) "-typecheck-children")))
+         (compile-func-sym (intern (concat (symbol-name struct-name) "-compile"))))
     `(progn
        ;; We could build the alist at macro expansion time instead, but leaving
        ;; it to runtime means we can sharp-quote the function names, so the byte
@@ -143,7 +150,8 @@ SLOTS are passed directly to `cl-defstruct'."
           (cons 'type ',name)
           (cons 'simplify-func #',simplify-func-sym)
           (cons 'expect-type-func #',expect-type-func-sym)
-          (cons 'typecheck-children-func #',typecheck-children-func-sym)))
+          (cons 'typecheck-children-func #',typecheck-children-func-sym)
+          (cons 'compile-func #',compile-func-sym)))
        (cl-defstruct
            (,struct-name
             (:include wordgen--expr
@@ -450,15 +458,21 @@ If it doesn't, an error is raised."
 ;; Lisp), put into a lambda, and finally compiled by Emacs's own byte compiler.
 ;; It's done this way because it's probably the easiest way in Lisp and it's
 ;; reasonably fast.
+;;
+;; The generated functions take two arguments: (RULES RNG).
+;; RULES is the compiled rule set, as returned by `wordgen-compile-ruleset'.
+;; RNG is the pseudo-random number generator, as returned by
+;; `wordgen--prng-create'.
 
 (defvar wordgen--compile-to-bytecode t
   "If non-nil, compile the generated lambdas to Emacs bytecode.
 Should be t at all times, except when debugging.")
 
-(defun wordgen--compile-expression-to-lambda (expression)
-  "Compile rule body EXPRESSION to an Emacs Lisp function."
-  (let ((func `(lambda (rules rng)
-                 ,(wordgen--compile-expression expression))))
+(defun wordgen--compile-elisp-to-lambda (expression)
+  "Compile Emacs Lisp form EXPRESSION to a Emacs Lisp bytecode.
+With `wordgen--compile-to-bytecode' nil, an uncompiled `lambda' form is returned
+instead."
+  (let ((func `(lambda (rules rng) ,expression)))
     (if wordgen--compile-to-bytecode
         ;; We have to silence `byte-compile-log-warning' as it can log some
         ;; warnings to *Compile-Log* even though we set `byte-compile-warnings'
@@ -473,99 +487,60 @@ Should be t at all times, except when debugging.")
       ;; Not compiling, just return the lambda.
       func)))
 
-(defun wordgen--compile-expression (expression)
-  "Compile EXPRESSION to an Emacs Lisp form."
-  (pcase expression
-    ((pred stringp) (wordgen--compile-string expression))
-    ((pred integerp) (wordgen--compile-integer expression))
-    ((pred vectorp) (wordgen--compile-choice-expr expression))
-    ((pred symbolp) (wordgen--compile-rule-call expression))
-    ((pred listp) (wordgen--compile-function-call expression))
-    (_ (error "Invalid expression %S" expression))))
+(defun wordgen--expr-compile (expr)
+  "Compile EXPR to an Emacs Lisp form."
+  (funcall (cdr (assq 'compile-func (wordgen--expr-subclass-type-info expr)))
+           expr))
 
-(defun wordgen--compile-string (string)
-  "Compile STRING to an Emacs Lisp form."
-  `(wordgen-print-string ,string))
+(defun wordgen--expr-integer-compile (integer)
+  "Compile an INTEGER to an Emacs Lisp form."
+  (wordgen--expr-integer-value integer))
 
-(defun wordgen--compile-integer (integer)
-  "Compile INTEGER to an Emacs Lisp form."
-  integer)
+(defun wordgen--expr-string-compile (string)
+  "Compile a STRING to an Emacs Lisp form."
+  `(wordgen-print-string ,(wordgen--expr-string-value string)))
 
-(defun wordgen--compile-choice-expr (vec)
-  "Compile choice expression VEC to an Emacs Lisp form.
-
-It's done by either building a vector of compiled forms and choosing a random
-index (when the elements' weights are dense enough), by building a sorted vector
-of ranges and binary-searching for a random number (when the weights are
-sparse), or by turning it into cond, comparing the rolled number against
-consecutive running total weights (when there are very few elements)."
-  (when (= 0 (length vec))
-    (error "Empty choice expression"))
-  (pcase-let ((`(,total-weight . ,subexprs)
-               (wordgen--normalize-choice-subexpressions vec)))
+(defun wordgen--expr-choice-compile (choice)
+  "Compile a CHOICE expression to an Emacs Lisp form."
+  (let ((total-weight (wordgen--expr-choice-total-weight choice))
+        (children (wordgen--expr-choice-children choice))
+        (children-count (wordgen--expr-choice-children-count choice)))
     ;; We have three strategies available to us.
     ;; * lookup table: used when the weights are relatively dense.
     ;; * binary search: used when the weights are sparse.
     ;; * cond-based linear search: used when the are few subexpressions.
     ;; The conditions used here are mere heuristics that work good enough.
     (cond
-     ((and (nthcdr 2 subexprs)
-           (> 10 (/ total-weight (length vec))))
-      (wordgen--compile-choice-dense subexprs total-weight))
-     ((nthcdr 5 subexprs)
-      (wordgen--compile-choice-sparse subexprs total-weight))
+     ((and (> children-count 2)
+           (> 10 (/ total-weight children-count)))
+      (wordgen--compile-choice-dense children total-weight))
+     ((> children-count 5)
+      (wordgen--compile-choice-sparse children total-weight))
      (t
-      (wordgen--compile-choice-tiny subexprs total-weight)))))
+      (wordgen--compile-choice-tiny children total-weight)))))
 
-(defun wordgen--normalize-choice-subexpressions (vec)
-  "Transform the choice expression VEC into more usable form.
-
-The returned value is (TOTAL-WEIGHT . SUBEXPRS).
-SUBEXPRS is a list of lists (EXPR WEIGHT RUNNING-WEIGHT).
-SUBEXPRS is sorted according to RUNNING-WEIGHT, ascending."
-  (let ((subexprs '())
-        (running-total-weight 0))
-    (dotimes (i (length vec))
-      (let ((subexpr (aref vec i)))
-        (push (pcase subexpr
-                ((and `(,weight ,subexpr-expr)
-                      (guard (integerp weight)))
-                 `(,subexpr-expr ,weight ,(cl-incf running-total-weight weight)))
-                (_
-                 `(,subexpr 1 ,(cl-incf running-total-weight))))
-              subexprs)))
-    (cons running-total-weight (nreverse subexprs))))
-
-(defun wordgen--compile-choice-dense (subexprs total-weight)
+(defun wordgen--compile-choice-dense (children total-weight)
   "Compile a choice expression into a dense table lookup.
-
-SUBEXPRS and TOTAL-WEIGHT are the results of
-`wordgen--normalize-choice-subexpressions', which see."
+CHILDREN and TOTAL-WEIGHT are the slots of `wordgen--expr-choice'."
   (let ((vec (wordgen--build-vector
-              total-weight subexprs #'wordgen--build-choice-subexpression)))
-    ;; Note: this let is actually useful, as it lets the compiler macro on
-    ;; `wordgen--eval-choice-subexpression' generate optimal bytecode.
+              total-weight children #'wordgen--build-choice-subexpression)))
     `(let ((x (aref ,vec (wordgen-prng-next-int ,(1- total-weight) rng))))
        (wordgen--eval-choice-subexpression x rules rng))))
 
-(defun wordgen--compile-choice-tiny (subexprs total-weight)
+(defun wordgen--compile-choice-tiny (children total-weight)
   "Compile a choice expression into a series of conditionals.
-
-SUBEXPRS and TOTAL-WEIGHT are the results of
-`wordgen--normalize-choice-subexpressions', which see."
+CHILDREN and TOTAL-WEIGHT are the slots of `wordgen--expr-choice'."
   `(let ((number (wordgen-prng-next-int ,(1- total-weight) rng)))
      (cond
       ,@(mapcar
          (pcase-lambda (`(,expr _ ,limit))
            `((< number ,limit)
-             ,(wordgen--compile-expression expr)))
-         subexprs))))
+             ,(wordgen--expr-compile expr)))
+         children))))
 
-(defun wordgen--compile-choice-sparse (subexprs total-weight)
+(defun wordgen--compile-choice-sparse (children total-weight)
   "Compile a choice expression into binary search.
-
-SUBEXPRS and TOTAL-WEIGHT are the results of
-`wordgen--normalize-choice-subexpressions', which see."
+CHILDREN and TOTAL-WEIGHT are the slots of `wordgen--expr-choice'."
   (let ((vec
          (apply
           #'vector
@@ -574,7 +549,7 @@ SUBEXPRS and TOTAL-WEIGHT are the results of
              (list (- running-weight weight)
                    running-weight
                    (wordgen--build-choice-subexpression expr)))
-           subexprs))))
+           children))))
     `(wordgen--choice-binary-search
       ,vec (wordgen-prng-next-int ,(1- total-weight) rng) rules rng)))
 
@@ -597,9 +572,9 @@ appears WEIGHT times in the returned vector."
 
 Strings are returned unchanged, other forms are wrapped in a lambda and
 compiled."
-  (if (stringp subexpr)
-      subexpr
-    (wordgen--compile-expression-to-lambda subexpr)))
+  (if (eq 'string (cdr (assq 'type (wordgen--expr-subclass-type-info subexpr))))
+      (wordgen--expr-string-value subexpr)
+    (wordgen--compile-elisp-to-lambda (wordgen--expr-compile subexpr))))
 
 (cl-defsubst wordgen--eval-choice-subexpression (subexpr rules rng)
   "Eval a SUBEXPR compiled by `wordgen--build-choice-subexpression'.
@@ -634,81 +609,46 @@ RULES and RNG are passed unchanged to the compiled forms."
            (t
             (setq low (1+ half)))))))))
 
-(defun wordgen--compile-function-call (function-call)
-  "Compile a builtin FUNCTION-CALL to an Emacs Lisp form."
-  (pcase function-call
-    (`(++ . ,rest)
-     (wordgen--compile-concat rest))
-    (`(replicate ,times ,expr)
-     (wordgen--compile-replicate times expr))
-    (`(eval-multiple-times ,times ,expr)
-     (wordgen--compile-eval-multiple-times times expr))
-    (`(lisp ,function)
-     (wordgen--compile-call-lisp function))
-    (_
-     (error "Invalid function call expression %S" function-call))))
-
-(defun wordgen--compile-concat (expressions)
-  "Compile concatenation to an Emacs Lisp form.
-EXPRESSIONS is a list of subexpressions.
-
-As all EXPRESSIONS must evaluate to a string, and we concat strings by adding
-them to a list, this is just a `progn'."
+(defun wordgen--expr-concat-compile (concat)
+  "Compile a CONCAT expression to an Emacs Lisp form."
   `(progn
-     ,@(mapcar (lambda (expr)
-                 `(let ((result ,(wordgen--compile-expression expr)))
-                    (unless (stringp result)
-                      (error "Arguments of ++ must be strings"))
-                    result))
-               expressions)))
+     ,@(mapcar #'wordgen--expr-compile (wordgen--expr-concat-children concat))))
 
-(defun wordgen--compile-replicate (times expr)
-  "Compile a replicate expression to an Emacs Lisp form.
-
-TIMES is the uncompiled replication count subexpression.
-EXPR is the uncompiled subexpression evaluating to the string to replicate.
-If TIMES is <= 0, the whole replicate evaluates to an empty string."
-  (let ((times-compiled (wordgen--compile-expression times))
-        (expr-compiled (wordgen--compile-expression expr)))
+(defun wordgen--expr-replicate-compile (replicate)
+  "Compile a REPLICATE expression to an Emacs Lisp form."
+  (let ((times-compiled
+         (wordgen--expr-compile (wordgen--expr-replicate-reps replicate)))
+        (form-compiled
+         (wordgen--expr-compile (wordgen--expr-replicate-subexpr replicate))))
     `(let ((times ,times-compiled))
-       (unless (integerp times)
-         (error "Replication count %S is not an integer" times))
        (when (> times 0)
-         (let ((string
-                (wordgen-with-output-to-string
-                  (unless (stringp ,expr-compiled)
-                    (error "Second argument of replicate must be a string")))))
+         (let ((string (wordgen-with-output-to-string ,form-compiled)))
            (dotimes (_ times)
-             (push string wordgen--output-strings))))
+             (wordgen-print-string string))))
        "")))
 
-(defun wordgen--compile-eval-multiple-times (times expr)
-  "Compile an eval-multiple-times expression to an Emacs Lisp form.
-
-TIMES is the uncompiled replication count subexpression.
-EXPR is the uncompiled subexpression to evaluate multiple times.
-Only the result of the last evaluation is returned.
-If TIMES is <= 0, the whole eval-multiple-times evaluates to an empty string."
-  (let ((times-compiled (wordgen--compile-expression times))
-        (expr-compiled (wordgen--compile-expression expr)))
+(defun wordgen--expr-concat-reeval-compile (concat-reeval)
+  "Compile a CONCAT-REEVAL expression to an Emacs Lisp form."
+  (let ((times-compiled
+         (wordgen--expr-compile (wordgen--expr-concat-reeval-reps concat-reeval)))
+        (form-compiled
+         (wordgen--expr-compile (wordgen--expr-concat-reeval-subexpr concat-reeval))))
     `(let ((times ,times-compiled))
-       (unless (integerp times)
-         (error "Evaluation count %S is not an integer" times))
        (if (<= times 0)
            ""
          ;; Run the loop N-1 times, so the result of the if will be the same as
          ;; that of last expr evaluation.
          (dotimes (_ (1- times))
-           ,expr-compiled)
-         ,expr-compiled))))
+           ,form-compiled)
+         ,form-compiled))))
 
-(defun wordgen--compile-call-lisp (lisp-function)
-  "Compile a call to a LISP-FUNCTION."
-  `(funcall ,lisp-function rules rng))
+(defun wordgen--expr-rule-call-compile (rule-call)
+  "Compile a RULE-CALL expression to an Emacs Lisp form."
+  `(wordgen-call-rule-by-name rules rng ',(wordgen--expr-rule-call-rule-name rule-call)))
 
-(defun wordgen--compile-rule-call (rule-name)
-  "Compile a call to rule RULE-NAME."
-  `(wordgen-call-rule-by-name rules rng ',rule-name))
+(defun wordgen--expr-lisp-call-compile (lisp-call)
+  "Compile a LISP-CALL expression to an Emacs Lisp form."
+  `(funcall ,(wordgen--expr-lisp-call-func lisp-call) rules rng))
 
 
 ;;; PRNG helpers
