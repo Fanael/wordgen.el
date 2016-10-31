@@ -207,7 +207,7 @@ SUBEXPRS is sorted according to RUNNING-WEIGHT, ascending."
                 (_
                  `(,subexpr 1 ,(cl-incf running-total-weight))))
               subexprs)))
-    (list running-total-weight (nreverse subexprs))))
+    (cons running-total-weight (nreverse subexprs))))
 
 (defun wordgen--compile-choice-dense (subexprs total-weight)
   "Compile a choice expression into a dense table lookup.
