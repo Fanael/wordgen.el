@@ -216,10 +216,10 @@ SUBEXPRS and TOTAL-WEIGHT are the results of
 `wordgen--normalize-choice-subexpressions', which see."
   (let ((vec (wordgen--build-vector
               total-weight subexprs #'wordgen--build-choice-subexpression)))
+    ;; Note: this let is actually useful, as it lets the compiler macro on
+    ;; `wordgen--eval-choice-subexpression' generate optimal bytecode.
     `(let ((x (aref ,vec (wordgen-prng-next-int ,(1- total-weight) rng))))
-       (if (stringp x)
-           (wordgen-print-string x)
-         (funcall x rules rng)))))
+       (wordgen--eval-choice-subexpression x rules rng))))
 
 (defun wordgen--compile-choice-tiny (subexprs total-weight)
   "Compile a choice expression into a series of conditionals.
@@ -274,6 +274,14 @@ compiled."
       subexpr
     (wordgen--compile-lambda-body (wordgen--compile-expression subexpr))))
 
+(cl-defsubst wordgen--eval-choice-subexpression (subexpr rules rng)
+  "Eval a SUBEXPR compiled by `wordgen--build-choice-subexpression'.
+
+RULES and RNG are passed unchanged to the compiled form."
+  (if (stringp subexpr)
+      (wordgen-print-string subexpr)
+    (funcall subexpr rules rng)))
+
 (defun wordgen--choice-binary-search (vec number rules rng)
   "Find the range in VEC in which NUMBER is, using binary search.
 
@@ -293,10 +301,7 @@ RULES and RNG are passed unchanged to the compiled forms."
            ((and (<= guess-low number)
                  (< number (nth 1 guess)))
             (let ((form (nth 2 guess)))
-              (throw 'return
-                     (if (stringp form)
-                         (wordgen-print-string form)
-                       (funcall form rules rng)))))
+              (throw 'return (wordgen--eval-choice-subexpression form rules rng))))
            ((> guess-low number)
             (setq high half))
            (t
