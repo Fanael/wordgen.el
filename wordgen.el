@@ -718,10 +718,9 @@ RULES and RNG are passed unchanged to the compiled forms."
 
 ;;; PRNG helpers
 
-(when (< most-positive-fixnum #xFFFFFFFF)
-  (error "This package requires Lisp integers to be at least 32-bit"))
-
 (eval-and-compile
+  (when (< most-positive-fixnum #xFFFFFFFF)
+    (error "This package requires Lisp integers to be at least 32-bit"))
   (defconst wordgen--prng-array-size 128)
   (defconst wordgen--prng-optimal-bytes-size (* 4 wordgen--prng-array-size)))
 
