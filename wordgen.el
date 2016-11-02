@@ -250,23 +250,26 @@ time."
                    (last-clause (null next)))
         (unless (consp clause)
           (error "%S is not a valid `wordgen--expr-case' clause" clause))
-        (pcase-let ((`(,typelist . ,body) clause))
-          (cl-flet ((add-cond-clause
-                     (condition)
-                     (push
-                      `(,(if last-clause t condition) ,@body)
-                      cond-clauses)))
-            (cond
-             ((listp typelist)
-              (add-cond-clause `(memq ,type-sym ',typelist))
-              (setq types-handled (append typelist types-handled)))
-             (t
-              (add-cond-clause `(eq ,type-sym ',typelist))
-              (push typelist types-handled)))))
+        (pcase-let ((`(,type-list . ,body) clause))
+          (unless (listp type-list)
+            (cl-callf list type-list))
+          (dolist (type type-list)
+            (unless (memq type wordgen--known-expr-types)
+              (error "Unknown expression type `%S'" type))
+            (when (memq type types-handled)
+              (error "Duplicate case for type `%S'" type))
+            (push type types-handled))
+          (push
+           `(,(cond
+               ;; Since the cases are guaranteed to be exhaustive (this macro
+               ;; signals otherwise), we can omit the condition for the last
+               ;; clause.
+               (last-clause t)
+               ((null (cdr type-list)) `(eq ,type-sym ',(car type-list)))
+               (t `(memq ,type-sym ',type-list)))
+             ,@body)
+           cond-clauses))
         (setq clauses next)))
-    (dolist (type types-handled)
-      (unless (memq type wordgen--known-expr-types)
-        (error "Unknown expression type `%S'" type)))
     (dolist (type wordgen--known-expr-types)
       (unless (memq type types-handled)
         (error "Expression type `%S' not handled" type)))
