@@ -243,28 +243,36 @@ If the CLAUSES are not exhaustive, an error is signaled at macro expansion
 time."
   (declare (indent 2) (debug (form sexp &rest (sexp body))))
   (let ((types-handled '())
-        (type-sym (or type-var (make-symbol "type"))))
-    (prog1
-        `(let ((,type-sym (wordgen--expr-subclass-type ,expr)))
-           (cond
-            ,@(mapcar
-               (lambda (case)
-                 (unless (consp case)
-                   (error "%S is not a valid `wordgen--expr-case' form" case))
-                 (let ((typelist (car case))
-                       (body (cdr case)))
-                   (if (listp typelist)
-                       (prog1 `((memq ,type-sym ',typelist) ,@body)
-                         (setq types-handled (append typelist types-handled)))
-                     (prog1 `((eq ,type-sym ',typelist) ,@(cdr case))
-                       (push typelist types-handled)))))
-               clauses)))
-      (dolist (type types-handled)
-        (unless (memq type wordgen--known-expr-types)
-          (error "Unknown expression type `%S'" type)))
-      (dolist (type wordgen--known-expr-types)
-        (unless (memq type types-handled)
-          (error "Expression type `%S' not handled" type))))))
+        (type-sym (or type-var (make-symbol "type")))
+        (cond-clauses '()))
+    (while clauses
+      (pcase-let* ((`(,clause . ,next) clauses)
+                   (last-clause (null next)))
+        (unless (consp clause)
+          (error "%S is not a valid `wordgen--expr-case' clause" clause))
+        (pcase-let ((`(,typelist . ,body) clause))
+          (cl-flet ((add-cond-clause
+                     (condition)
+                     (push
+                      `(,(if last-clause t condition) ,@body)
+                      cond-clauses)))
+            (cond
+             ((listp typelist)
+              (add-cond-clause `(memq ,type-sym ',typelist))
+              (setq types-handled (append typelist types-handled)))
+             (t
+              (add-cond-clause `(eq ,type-sym ',typelist))
+              (push typelist types-handled)))))
+        (setq clauses next)))
+    (dolist (type types-handled)
+      (unless (memq type wordgen--known-expr-types)
+        (error "Unknown expression type `%S'" type)))
+    (dolist (type wordgen--known-expr-types)
+      (unless (memq type types-handled)
+        (error "Expression type `%S' not handled" type)))
+    `(let ((,type-sym (wordgen--expr-subclass-type ,expr)))
+       (cond
+        ,@(nreverse cond-clauses)))))
 
 (wordgen--define-derived-expr-type (string 'string)
     (wordgen--expr-string-make (value original-form))
@@ -417,9 +425,6 @@ The returned value is unspecified."
       nil)
      ((null expr-type)
       (wordgen--expr-case expr nil
-        ;; These types won't even reach this point.
-        ((integer string rule-call concat replicate concat-reeval)
-         nil)
         (choice
          (pcase-dolist (`(,child . ,_) (wordgen--expr-choice-children expr))
            (wordgen--expr-expect-type child type))
@@ -427,7 +432,10 @@ The returned value is unspecified."
          (setf (wordgen--expr-type expr) type))
         (lisp-call
          ;; So we later know what to do when compiling.
-         (setf (wordgen--expr-type expr) type))))
+         (setf (wordgen--expr-type expr) type))
+        ;; These types won't even reach this point.
+        ((integer string rule-call concat replicate concat-reeval)
+         nil)))
      (t
       (error "Expected type `%S', but %S is of type `%S'"
              type (wordgen--expr-original-form expr) expr-type)))))
@@ -435,8 +443,6 @@ The returned value is unspecified."
 (defun wordgen--expr-typecheck-children (expr)
   "Verify that all children of EXPR are of the correct type."
   (wordgen--expr-case expr nil
-    ((integer string rule-call lisp-call)
-     nil)
     (choice
      (pcase-dolist (`(,child . ,_) (wordgen--expr-choice-children expr))
        (wordgen--expr-typecheck-children child)))
@@ -457,7 +463,9 @@ The returned value is unspecified."
        (wordgen--expr-expect-type reps 'integer)
        (wordgen--expr-typecheck-children reps)
        (wordgen--expr-expect-type form 'string)
-       (wordgen--expr-typecheck-children form)))))
+       (wordgen--expr-typecheck-children form)))
+    ((integer string rule-call lisp-call)
+     nil)))
 
 
 ;;; Expression compiler
