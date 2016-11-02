@@ -227,8 +227,10 @@ SLOTS are passed directly to `cl-defstruct'."
             (:type vector))
          ,@slots))))
 
-(defmacro wordgen--expr-case (expr &rest clauses)
+(defmacro wordgen--expr-case (expr type-var &rest clauses)
   "Eval EXPR and choose a clause according to its type.
+
+With TYPE-VAR non-nil, the symbol TYPE-VAR is bound to the type of EXPR.
 
 Each one of CLAUSES looks like (TYPE BODY...), where TYPE is either a symbol
 representing a wordgen IR type (see `wordgen--define-derived-expr-type') or a
@@ -239,9 +241,9 @@ according to `memq' (when TYPE is a list), the corresponding BODY is evaluated.
 
 If the CLAUSES are not exhaustive, an error is signaled at macro expansion
 time."
-  (declare (indent 1) (debug (form &rest (sexp body))))
+  (declare (indent 2) (debug (form sexp &rest (sexp body))))
   (let ((types-handled '())
-        (type-sym (make-symbol "type")))
+        (type-sym (or type-var (make-symbol "type"))))
     (prog1
         `(let ((,type-sym (wordgen--expr-subclass-type ,expr)))
            (cond
@@ -414,7 +416,7 @@ The returned value is unspecified."
      ((eq expr-type type)
       nil)
      ((null expr-type)
-      (wordgen--expr-case expr
+      (wordgen--expr-case expr nil
         ;; These types won't even reach this point.
         ((integer string rule-call concat replicate concat-reeval)
          nil)
@@ -432,7 +434,7 @@ The returned value is unspecified."
 
 (defun wordgen--expr-typecheck-children (expr)
   "Verify that all children of EXPR are of the correct type."
-  (wordgen--expr-case expr
+  (wordgen--expr-case expr nil
     ((integer string rule-call lisp-call)
      nil)
     (choice
@@ -496,7 +498,7 @@ instead."
 
 (defun wordgen--expr-compile (expr)
   "Compile EXPR to an Emacs Lisp form."
-  (wordgen--expr-case expr
+  (wordgen--expr-case expr nil
     (integer
      (wordgen--expr-integer-value expr))
     (string
@@ -602,7 +604,7 @@ and compiled.
 
 See also `wordgen--eval-choice-subexpression', which evaluates the returned
 object."
-  (wordgen--expr-case subexpr
+  (wordgen--expr-case subexpr nil
     (string
      (wordgen--expr-string-value subexpr))
     (integer
@@ -634,10 +636,12 @@ If all CHILDREN are string literals, integer literals, or lambdas, symbols
   (catch 'return
     (let (type)
       (pcase-dolist (`(,child . ,_) children)
-        (let ((child-type (wordgen--expr-subclass-type child)))
-          ;; Not a simple literal.
-          (unless (memq child-type '(string integer))
-            (setq child-type 'lambda))
+        (let ((child-type
+               (wordgen--expr-case child child-type
+                 ((integer string)
+                  child-type)
+                 ((concat choice rule-call lisp-call replicate concat-reeval)
+                  'lambda))))
           ;; Mixed-type list.
           (when (and type (not (eq child-type type)))
             (throw 'return nil))
