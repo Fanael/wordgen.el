@@ -194,9 +194,12 @@ RULE-NAME is the name of the rule to call."
      (:predicate nil)
      (:type vector))
   "Base struct for intermediate representation expression objects."
-  (subclass-type-info :read-only t)
+  (subclass-type :read-only t)
   (type)
   (original-form :read-only t))
+
+(eval-and-compile
+  (defvar wordgen--known-expr-types '()))
 
 (defmacro wordgen--define-derived-expr-type (name-type ctor &rest slots)
   "Define a `cl-defstruct' for a derived IR expression type.
@@ -209,26 +212,14 @@ SLOTS are passed directly to `cl-defstruct'."
   (declare (indent 2) (doc-string 3))
   (let* ((name (nth 0 name-type))
          (type (nth 1 name-type))
-         (struct-name (intern (concat "wordgen--expr-" (symbol-name name))))
-         (type-info-sym (intern (concat (symbol-name struct-name) "-type-info")))
-         (expect-type-func-sym (intern (concat (symbol-name struct-name) "-expect-type")))
-         (typecheck-children-func-sym
-          (intern (concat (symbol-name struct-name) "-typecheck-children")))
-         (compile-func-sym (intern (concat (symbol-name struct-name) "-compile"))))
+         (struct-name (intern (concat "wordgen--expr-" (symbol-name name)))))
     `(progn
-       ;; We could build the alist at macro expansion time instead, but leaving
-       ;; it to runtime means we can sharp-quote the function names, so the byte
-       ;; compiler will warn if a function is not defined.
-       (defconst ,type-info-sym
-         (list
-          (cons 'type ',name)
-          (cons 'expect-type-func #',expect-type-func-sym)
-          (cons 'typecheck-children-func #',typecheck-children-func-sym)
-          (cons 'compile-func #',compile-func-sym)))
+       (eval-and-compile
+         (cl-pushnew ',name wordgen--known-expr-types :test #'eq))
        (cl-defstruct
            (,struct-name
             (:include wordgen--expr
-                      (subclass-type-info ,type-info-sym)
+                      (subclass-type ',name)
                       (type ,type))
             (:copier nil)
             (:constructor nil)
@@ -236,9 +227,42 @@ SLOTS are passed directly to `cl-defstruct'."
             (:type vector))
          ,@slots))))
 
-(defun wordgen--expr-subclass-type (expr)
-  "Get the type tag of EXPR."
-  (cdr (assq 'type (wordgen--expr-subclass-type-info expr))))
+(defmacro wordgen--expr-case (expr &rest clauses)
+  "Eval EXPR and choose a clause according to its type.
+
+Each one of CLAUSES looks like (TYPE BODY...), where TYPE is either a symbol
+representing a wordgen IR type (see `wordgen--define-derived-expr-type') or a
+list of such symbols.
+
+If the type EXPR is `eq' to TYPE (when TYPE is a symbol) or is an element of it
+according to `memq' (when TYPE is a list), the corresponding BODY is evaluated.
+
+If the CLAUSES are not exhaustive, an error is signaled at macro expansion
+time."
+  (declare (indent 1) (debug (form &rest (sexp body))))
+  (let ((types-handled '())
+        (type-sym (make-symbol "type")))
+    (prog1
+        `(let ((,type-sym (wordgen--expr-subclass-type ,expr)))
+           (cond
+            ,@(mapcar
+               (lambda (case)
+                 (unless (consp case)
+                   (error "%S is not a valid `wordgen--expr-case' form" case))
+                 (let ((typelist (car case))
+                       (body (cdr case)))
+                   (if (listp typelist)
+                       (prog1 `((memq ,type-sym ',typelist) ,@body)
+                         (setq types-handled (append typelist types-handled)))
+                     (prog1 `((eq ,type-sym ',typelist) ,@(cdr case))
+                       (push typelist types-handled)))))
+               clauses)))
+      (dolist (type types-handled)
+        (unless (memq type wordgen--known-expr-types)
+          (error "Unknown expression type `%S'" type)))
+      (dolist (type wordgen--known-expr-types)
+        (unless (memq type types-handled)
+          (error "Expression type `%S' not handled" type))))))
 
 (wordgen--define-derived-expr-type (string 'string)
     (wordgen--expr-string-make (value original-form))
@@ -390,72 +414,48 @@ The returned value is unspecified."
      ((eq expr-type type)
       nil)
      ((null expr-type)
-      (funcall (cdr (assq 'expect-type-func (wordgen--expr-subclass-type-info expr)))
-               expr type))
+      (wordgen--expr-case expr
+        ;; These types won't even reach this point.
+        ((integer string rule-call concat replicate concat-reeval)
+         nil)
+        (choice
+         (pcase-dolist (`(,child . ,_) (wordgen--expr-choice-children expr))
+           (wordgen--expr-expect-type child type))
+         ;; If we're still here, `type' is the correct type, so store it.
+         (setf (wordgen--expr-type expr) type))
+        (lisp-call
+         ;; So we later know what to do when compiling.
+         (setf (wordgen--expr-type expr) type))))
      (t
       (error "Expected type `%S', but %S is of type `%S'"
              type (wordgen--expr-original-form expr) expr-type)))))
 
-;; These are always of the same type, so the type checking done by
-;; `wordgen--expr-expect-type' is enough.
-(defalias 'wordgen--expr-integer-expect-type #'ignore)
-(defalias 'wordgen--expr-string-expect-type #'ignore)
-(defalias 'wordgen--expr-rule-call-expect-type #'ignore)
-(defalias 'wordgen--expr-concat-expect-type #'ignore)
-(defalias 'wordgen--expr-replicate-expect-type #'ignore)
-(defalias 'wordgen--expr-concat-reeval-expect-type #'ignore)
-
-(defun wordgen--expr-choice-expect-type (choice type)
-  "Determine if the actual type of CHOICE expression matches TYPE.
-If it doesn't, an error is raised."
-  (pcase-dolist (`(,child . ,_) (wordgen--expr-choice-children choice))
-    (wordgen--expr-expect-type child type))
-  ;; If we're still here, `type' is the correct type, so store it.
-  (setf (wordgen--expr-type choice) type))
-
-(defun wordgen--expr-lisp-call-expect-type (lisp-call type)
-  "Pretend that a LISP-CALL is of TYPE."
-  ;; So we later know what to do when compiling.
-  (setf (wordgen--expr-type lisp-call) type))
-
 (defun wordgen--expr-typecheck-children (expr)
   "Verify that all children of EXPR are of the correct type."
-  (funcall (cdr (assq 'typecheck-children-func (wordgen--expr-subclass-type-info expr)))
-           expr))
-
-(defalias 'wordgen--expr-integer-typecheck-children #'ignore)
-(defalias 'wordgen--expr-string-typecheck-children #'ignore)
-(defalias 'wordgen--expr-rule-call-typecheck-children #'ignore)
-(defalias 'wordgen--expr-lisp-call-typecheck-children #'ignore)
-
-(defun wordgen--expr-choice-typecheck-children (choice)
-  "Verify that all children of CHOICE typecheck."
-  (pcase-dolist (`(,child . ,_) (wordgen--expr-choice-children choice))
-    (wordgen--expr-typecheck-children child)))
-
-(defun wordgen--expr-concat-typecheck-children (concat)
-  "Verify that all children of CONCAT typecheck."
-  (dolist (child (wordgen--expr-concat-children concat))
-    (wordgen--expr-expect-type child 'string)
-    (wordgen--expr-typecheck-children child)))
-
-(defun wordgen--expr-replicate-typecheck-children (replicate)
-  "Verify that all children of REPLICATE typecheck."
-  (let ((reps (wordgen--expr-replicate-reps replicate))
-        (form (wordgen--expr-replicate-subexpr replicate)))
-    (wordgen--expr-expect-type reps 'integer)
-    (wordgen--expr-typecheck-children reps)
-    (wordgen--expr-expect-type form 'string)
-    (wordgen--expr-typecheck-children form)))
-
-(defun wordgen--expr-concat-reeval-typecheck-children (concat-reeval)
-  "Verify that all children of CONCAT-REEVAL typecheck."
-  (let ((reps (wordgen--expr-concat-reeval-reps concat-reeval))
-        (form (wordgen--expr-concat-reeval-subexpr concat-reeval)))
-    (wordgen--expr-expect-type reps 'integer)
-    (wordgen--expr-typecheck-children reps)
-    (wordgen--expr-expect-type form 'string)
-    (wordgen--expr-typecheck-children form)))
+  (wordgen--expr-case expr
+    ((integer string rule-call lisp-call)
+     nil)
+    (choice
+     (pcase-dolist (`(,child . ,_) (wordgen--expr-choice-children expr))
+       (wordgen--expr-typecheck-children child)))
+    (concat
+     (dolist (child (wordgen--expr-concat-children expr))
+       (wordgen--expr-expect-type child 'string)
+       (wordgen--expr-typecheck-children child)))
+    (replicate
+     (let ((reps (wordgen--expr-replicate-reps expr))
+           (form (wordgen--expr-replicate-subexpr expr)))
+       (wordgen--expr-expect-type reps 'integer)
+       (wordgen--expr-typecheck-children reps)
+       (wordgen--expr-expect-type form 'string)
+       (wordgen--expr-typecheck-children form)))
+    (concat-reeval
+     (let ((reps (wordgen--expr-concat-reeval-reps expr))
+           (form (wordgen--expr-concat-reeval-subexpr expr)))
+       (wordgen--expr-expect-type reps 'integer)
+       (wordgen--expr-typecheck-children reps)
+       (wordgen--expr-expect-type form 'string)
+       (wordgen--expr-typecheck-children form)))))
 
 
 ;;; Expression compiler
@@ -496,16 +496,24 @@ instead."
 
 (defun wordgen--expr-compile (expr)
   "Compile EXPR to an Emacs Lisp form."
-  (funcall (cdr (assq 'compile-func (wordgen--expr-subclass-type-info expr)))
-           expr))
-
-(defun wordgen--expr-integer-compile (integer)
-  "Compile an INTEGER to an Emacs Lisp form."
-  (wordgen--expr-integer-value integer))
-
-(defun wordgen--expr-string-compile (string)
-  "Compile a STRING to an Emacs Lisp form."
-  `(wordgen-print-string ,(wordgen--expr-string-value string)))
+  (wordgen--expr-case expr
+    (integer
+     (wordgen--expr-integer-value expr))
+    (string
+     `(wordgen-print-string ,(wordgen--expr-string-value expr)))
+    (rule-call
+     `(wordgen-call-rule-by-name rules rng ',(wordgen--expr-rule-call-rule-name expr)))
+    (concat
+     `(progn
+        ,@(mapcar #'wordgen--expr-compile (wordgen--expr-concat-children expr))))
+    (choice
+     (wordgen--expr-choice-compile expr))
+    (replicate
+     (wordgen--expr-replicate-compile expr))
+    (concat-reeval
+     (wordgen--expr-concat-reeval-compile expr))
+    (lisp-call
+     (wordgen--expr-lisp-call-compile expr))))
 
 (defun wordgen--expr-choice-compile (choice)
   "Compile a CHOICE expression to an Emacs Lisp form."
@@ -594,12 +602,12 @@ and compiled.
 
 See also `wordgen--eval-choice-subexpression', which evaluates the returned
 object."
-  (pcase (wordgen--expr-subclass-type subexpr)
-    (`string
+  (wordgen--expr-case subexpr
+    (string
      (wordgen--expr-string-value subexpr))
-    (`integer
+    (integer
      (wordgen--expr-integer-value subexpr))
-    (_
+    ((concat rule-call lisp-call replicate concat-reeval choice)
      (wordgen--compile-elisp-to-lambda (wordgen--expr-compile subexpr)))))
 
 (cl-defsubst wordgen--eval-choice-subexpression (subexpr rules rng)
@@ -661,11 +669,6 @@ RULES and RNG are passed unchanged to the compiled forms."
            (t
             (setq low (1+ half)))))))))
 
-(defun wordgen--expr-concat-compile (concat)
-  "Compile a CONCAT expression to an Emacs Lisp form."
-  `(progn
-     ,@(mapcar #'wordgen--expr-compile (wordgen--expr-concat-children concat))))
-
 (defun wordgen--expr-replicate-compile (replicate)
   "Compile a REPLICATE expression to an Emacs Lisp form."
   (let ((times-compiled
@@ -693,10 +696,6 @@ RULES and RNG are passed unchanged to the compiled forms."
          (dotimes (_ (1- times))
            ,form-compiled)
          ,form-compiled))))
-
-(defun wordgen--expr-rule-call-compile (rule-call)
-  "Compile a RULE-CALL expression to an Emacs Lisp form."
-  `(wordgen-call-rule-by-name rules rng ',(wordgen--expr-rule-call-rule-name rule-call)))
 
 (defun wordgen--expr-lisp-call-compile (lisp-call)
   "Compile a LISP-CALL expression to an Emacs Lisp form."
