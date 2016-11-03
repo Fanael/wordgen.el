@@ -356,11 +356,30 @@ CHILDREN is sorted according to RUNNING-WEIGHT, ascending."
                 (_
                  `(,child 1 ,(cl-incf running-total-weight))))
               children)))
+    (let ((weight-gcd (wordgen--gcd-choice-weights children)))
+      (when (/= weight-gcd 1)
+        (dolist (child children)
+          (cl-callf / (nth 1 child) weight-gcd)
+          (cl-callf / (nth 2 child) weight-gcd))
+        (cl-callf / running-total-weight weight-gcd)))
     ;; Actually compile the children now.
     (dolist (child children)
       (cl-callf wordgen--parse-expression (car child)))
     (wordgen--expr-choice-make
      children-count running-total-weight (nreverse children) vec)))
+
+(defun wordgen--gcd-choice-weights (children)
+  "Find the greatest common divisor of the weights of CHILDREN."
+  (catch 'return
+    (let ((gcd (nth 1 (car children))))
+      (dolist (child (cdr children))
+        (let ((weight (nth 1 child)))
+          (while (/= weight 0)
+            (cl-psetq gcd weight
+                      weight (% gcd weight))))
+        (when (= gcd 1)
+          (throw 'return 1)))
+      gcd)))
 
 (defun wordgen--parse-rule-call (rule)
   "Compile a RULE call to intermediate representation."
