@@ -591,7 +591,7 @@ CHILDREN and TOTAL-WEIGHT are the slots of `wordgen--expr-choice'."
       ,@(mapcar
          (lambda (child)
            (pcase-let ((`(,expr _ ,limit) child))
-             `((< number ,limit)
+             `(,(if (= limit total-weight) t `(< number ,limit))
                ,(wordgen--expr-compile expr))))
          children))))
 
