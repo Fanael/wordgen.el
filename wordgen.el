@@ -561,7 +561,7 @@ instead."
      ((and (> children-count 2)
            (> 10 (/ total-weight children-count)))
       (wordgen--compile-choice-dense children total-weight))
-     ((> children-count 5)
+     ((> children-count 50)
       (wordgen--compile-choice-sparse children total-weight))
      (t
       (wordgen--compile-choice-tiny children total-weight)))))
