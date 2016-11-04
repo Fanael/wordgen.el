@@ -587,8 +587,7 @@ CHILDREN and TOTAL-WEIGHT are the slots of `wordgen--expr-choice'."
   (let* ((total-weight (wordgen--expr-choice-total-weight choice))
          (children (wordgen--expr-choice-children choice))
          (count (wordgen--expr-choice-children-count choice))
-         (tree
-          (wordgen--sorted-array-to-binary-tree (vconcat children) 0 count)))
+         (tree (wordgen--sorted-list-to-binary-tree children count)))
     `(let ((number (wordgen-prng-next-int ,(1- total-weight) rng)))
        ,(wordgen--compile-choice-tree-1 tree))))
 
@@ -617,17 +616,21 @@ CHILDREN and TOTAL-WEIGHT are the slots of `wordgen--expr-choice'."
      (t
       body))))
 
-(defun wordgen--sorted-array-to-binary-tree (vec start end)
-  "Given a sorted vector VEC, return the corresponding binary tree.
-Only the range [START..END) of VEC is used; when it's empty, nil is returned.
+(defun wordgen--sorted-list-to-binary-tree (list length)
+  "Given a sorted LIST, return the corresponding binary search tree.
+Only the first LENGTH elements are considered.
 
 Each node of the tree is of the form (VALUE . (LEFT . RIGHT))."
-  (unless (>= start end)
-    (let ((mid (+ start (/ (- end start) 2))))
-      (cons (aref vec mid)
-            (cons
-             (wordgen--sorted-array-to-binary-tree vec start mid)
-             (wordgen--sorted-array-to-binary-tree vec (1+ mid) end))))))
+  (cl-labels
+      ((build-tree-bottom-up
+        (start end)
+        (unless (>= start end)
+          (let* ((mid (+ start (/ (- end start) 2)))
+                 (left (build-tree-bottom-up start mid))
+                 (value (pop list))
+                 (right (build-tree-bottom-up (1+ mid) end)))
+            (cons value (cons left right))))))
+    (build-tree-bottom-up 0 length)))
 
 (defun wordgen--build-vector (length subexprs)
   "Build a vector of LENGTH elements using SUBEXPRS.
