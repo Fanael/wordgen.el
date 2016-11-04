@@ -552,19 +552,11 @@ instead."
   (let ((total-weight (wordgen--expr-choice-total-weight choice))
         (children (wordgen--expr-choice-children choice))
         (children-count (wordgen--expr-choice-children-count choice)))
-    ;; We have three strategies available to us.
-    ;; * lookup table: used when the weights are relatively dense.
-    ;; * binary search: used when the weights are sparse.
-    ;; * cond-based linear search: used when the are few subexpressions.
-    ;; The conditions used here are mere heuristics that work good enough.
-    (cond
-     ((and (> children-count 2)
-           (> 10 (/ total-weight children-count)))
-      (wordgen--compile-choice-dense children total-weight))
-     ((> children-count 50)
-      (wordgen--compile-choice-sparse children total-weight))
-     (t
-      (wordgen--compile-choice-tiny children total-weight)))))
+    ;; A lookup table makes sense only when the weights are relatively dense.
+    (if (and (> children-count 2)
+             (> 10 (/ total-weight children-count)))
+        (wordgen--compile-choice-dense children total-weight)
+      (wordgen--compile-choice-tree choice))))
 
 (defun wordgen--compile-choice-dense (children total-weight)
   "Compile a choice expression into a dense table lookup.
@@ -583,33 +575,51 @@ CHILDREN and TOTAL-WEIGHT are the slots of `wordgen--expr-choice'."
        `(let ((x ,aref-form))
           (wordgen--eval-choice-subexpression x rules rng))))))
 
-(defun wordgen--compile-choice-tiny (children total-weight)
-  "Compile a choice expression into a series of conditionals.
-CHILDREN and TOTAL-WEIGHT are the slots of `wordgen--expr-choice'."
-  `(let ((number (wordgen-prng-next-int ,(1- total-weight) rng)))
-     (cond
-      ,@(mapcar
-         (lambda (child)
-           (pcase-let ((`(,expr _ ,limit) child))
-             `(,(if (= limit total-weight) t `(< number ,limit))
-               ,(wordgen--expr-compile expr))))
-         children))))
+(defun wordgen--compile-choice-tree (choice)
+  "Compile a CHOICE expression into a binary tree of conditionals."
+  (let* ((total-weight (wordgen--expr-choice-total-weight choice))
+         (children (wordgen--expr-choice-children choice))
+         (count (wordgen--expr-choice-children-count choice))
+         (tree (wordgen--sorted-array-to-binary-tree (vconcat children) 0 count)))
+    `(let ((number (wordgen-prng-next-int ,(1- total-weight) rng)))
+       ,(wordgen--compile-choice-tree-1 tree))))
 
-(defun wordgen--compile-choice-sparse (children total-weight)
-  "Compile a choice expression into binary search.
-CHILDREN and TOTAL-WEIGHT are the slots of `wordgen--expr-choice'."
-  (let ((vec
-         (apply
-          #'vector
-          (mapcar
-           (lambda (child)
-             (pcase-let ((`(,expr ,weight ,running-weight) child))
-               (list (- running-weight weight)
-                     running-weight
-                     (wordgen--build-choice-subexpression expr))))
-           children))))
-    `(wordgen--choice-binary-search
-      ,vec (wordgen-prng-next-int ,(1- total-weight) rng) rules rng)))
+(defun wordgen--compile-choice-tree-1 (node)
+  "Compile a NODE of the choice expression tree to an Emacs Lisp form."
+  (pcase-let* ((`((,expr ,weight ,limit) . (,left-child . ,right-child)) node)
+               (body (wordgen--expr-compile expr))
+               (start (- limit weight)))
+    (cond
+     ((and left-child right-child)
+      `(cond
+        ((< number ,start)
+         ,(wordgen--compile-choice-tree-1 left-child))
+        ((>= number ,limit)
+         ,(wordgen--compile-choice-tree-1 right-child))
+        (t
+         ,body)))
+     (left-child
+      `(if (>= number ,start)
+           ,body
+         ,(wordgen--compile-choice-tree-1 left-child)))
+     (right-child
+      `(if (< number ,limit)
+           ,body
+         ,(wordgen--compile-choice-tree-1 right-child)))
+     (t
+      body))))
+
+(defun wordgen--sorted-array-to-binary-tree (vec start end)
+  "Given a sorted vector VEC, return the corresponding binary tree.
+Only the range [START..END) of VEC is used; when it's empty, nil is returned.
+
+Each node of the tree is of the form (VALUE . (LEFT . RIGHT))."
+  (unless (>= start end)
+    (let ((mid (+ start (/ (- end start) 2))))
+      (cons (aref vec mid)
+            (cons
+             (wordgen--sorted-array-to-binary-tree vec start mid)
+             (wordgen--sorted-array-to-binary-tree vec (1+ mid) end))))))
 
 (defun wordgen--build-vector (length subexprs)
   "Build a vector of LENGTH elements using SUBEXPRS.
@@ -677,31 +687,6 @@ If all CHILDREN are string literals, integer literals, or lambdas, symbols
             (throw 'return nil))
           (setq type child-type)))
       type)))
-
-(defun wordgen--choice-binary-search (vec number rules rng)
-  "Find the range in VEC in which NUMBER is, using binary search.
-
-VEC is a sorted vector of (BEGIN END FORM), where [BEGIN..END) is a numeric
-range and FORM is its corresponding compiled form returned from
-`wordgen--build-choice-subexpression'.
-
-RULES and RNG are passed unchanged to the compiled forms."
-  (catch 'return
-    (let ((low 0)
-          (high (length vec)))
-      (while t
-        (let* ((half (+ low (/ (- high low) 2)))
-               (guess (aref vec half))
-               (guess-low (nth 0 guess)))
-          (cond
-           ((and (<= guess-low number)
-                 (< number (nth 1 guess)))
-            (let ((form (nth 2 guess)))
-              (throw 'return (wordgen--eval-choice-subexpression form rules rng))))
-           ((> guess-low number)
-            (setq high half))
-           (t
-            (setq low (1+ half)))))))))
 
 (defun wordgen--expr-replicate-compile (replicate)
   "Compile a REPLICATE expression to an Emacs Lisp form."
