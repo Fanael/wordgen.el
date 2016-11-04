@@ -122,10 +122,12 @@ RULESET compilation time.
 Type errors, like (replicate \"foo\" 3) or (++ \"foo\" 10), also result in an
 error being signaled during RULESET compilation."
   (let ((compiled-ruleset (wordgen-compile-ruleset ruleset))
-        (rng (wordgen--prng-create-from-bytes (or seed (wordgen--get-default-seed))))
+        (rng (wordgen--prng-create-from-bytes
+              (or seed (wordgen--get-default-seed))))
         (result '()))
     (dotimes (_ word-count)
-      (push (wordgen-evaluate-ruleset compiled-ruleset rng starting-rule) result))
+      (push (wordgen-evaluate-ruleset compiled-ruleset rng starting-rule)
+            result))
     result))
 
 (defun wordgen-compile-ruleset (ruleset)
@@ -286,7 +288,8 @@ time."
   (value :read-only t))
 
 (wordgen--define-derived-expr-type (choice nil)
-    (wordgen--expr-choice-make (children-count total-weight children original-form))
+    (wordgen--expr-choice-make
+     (children-count total-weight children original-form))
   "CHILDREN is a list of lists (EXPR WEIGHT RUNNING-WEIGHT).
 CHILDREN is sorted according to RUNNING-WEIGHT, ascending."
   ;; The children count is trivial to get from the original vector, so store it
@@ -388,7 +391,8 @@ CHILDREN is sorted according to RUNNING-WEIGHT, ascending."
 (defun wordgen--parse-concat (expression)
   "Compile a concat expression to intermediate representation.
 EXPRESSION is the whole (++ ...) list."
-  (wordgen--expr-concat-make (mapcar #'wordgen--parse-expression (cdr expression))
+  (wordgen--expr-concat-make (mapcar #'wordgen--parse-expression
+                                     (cdr expression))
                              expression))
 
 (defun wordgen--parse-replicate (expression)
@@ -534,10 +538,12 @@ instead."
     (string
      `(wordgen-print-string ,(wordgen--expr-string-value expr)))
     (rule-call
-     `(wordgen-call-rule-by-name rules rng ',(wordgen--expr-rule-call-rule-name expr)))
+     `(wordgen-call-rule-by-name
+       rules rng ',(wordgen--expr-rule-call-rule-name expr)))
     (concat
      `(progn
-        ,@(mapcar #'wordgen--expr-compile (wordgen--expr-concat-children expr))))
+        ,@(mapcar #'wordgen--expr-compile
+                  (wordgen--expr-concat-children expr))))
     (choice
      (wordgen--expr-choice-compile expr))
     (replicate
@@ -563,7 +569,8 @@ instead."
 CHILDREN and TOTAL-WEIGHT are the slots of `wordgen--expr-choice'."
   (let* ((same-type (wordgen--choice-children-same-eval-type-p children))
          (vec (wordgen--build-vector total-weight children))
-         (aref-form `(aref ,vec (wordgen-prng-next-int ,(1- total-weight) rng))))
+         (aref-form
+          `(aref ,vec (wordgen-prng-next-int ,(1- total-weight) rng))))
     (pcase same-type
       (`integer aref-form)
       (`string `(wordgen-print-string ,aref-form))
@@ -580,7 +587,8 @@ CHILDREN and TOTAL-WEIGHT are the slots of `wordgen--expr-choice'."
   (let* ((total-weight (wordgen--expr-choice-total-weight choice))
          (children (wordgen--expr-choice-children choice))
          (count (wordgen--expr-choice-children-count choice))
-         (tree (wordgen--sorted-array-to-binary-tree (vconcat children) 0 count)))
+         (tree
+          (wordgen--sorted-array-to-binary-tree (vconcat children) 0 count)))
     `(let ((number (wordgen-prng-next-int ,(1- total-weight) rng)))
        ,(wordgen--compile-choice-tree-1 tree))))
 
@@ -704,9 +712,11 @@ If all CHILDREN are string literals, integer literals, or lambdas, symbols
 (defun wordgen--expr-concat-reeval-compile (concat-reeval)
   "Compile a CONCAT-REEVAL expression to an Emacs Lisp form."
   (let ((times-compiled
-         (wordgen--expr-compile (wordgen--expr-concat-reeval-reps concat-reeval)))
+         (wordgen--expr-compile
+          (wordgen--expr-concat-reeval-reps concat-reeval)))
         (form-compiled
-         (wordgen--expr-compile (wordgen--expr-concat-reeval-subexpr concat-reeval))))
+         (wordgen--expr-compile
+          (wordgen--expr-concat-reeval-subexpr concat-reeval))))
     `(let ((times ,times-compiled))
        (if (<= times 0)
            ""
@@ -749,10 +759,13 @@ When available, uses /dev/urandom."
     (set-buffer-multibyte nil)
     (setq buffer-file-coding-system 'binary)
     (pcase (ignore-errors
-             (call-process "dd" nil '(t nil) nil
-                           "if=/dev/urandom"
-                           (eval-when-compile (concat "bs=" (number-to-string wordgen--prng-optimal-bytes-size)))
-                           "count=1"))
+             (call-process
+              "dd" nil '(t nil) nil
+              "if=/dev/urandom"
+              (eval-when-compile
+                (concat "bs="
+                        (number-to-string wordgen--prng-optimal-bytes-size)))
+              "count=1"))
       (`0 (buffer-string))
       (_ (current-time-string)))))
 
@@ -775,13 +788,15 @@ PASSED-ARRAY must be a vector of 128 32-bit integers."
               `(let ((,value-symbol ,value))
                  (logxor ,value-symbol
                          ,(if (> shift 0)
-                              ;; We're shifting left, so the result may be bigger than 32
-                              ;; bits; truncate it.
+                              ;; We're shifting left, so the result may be
+                              ;; bigger than 32 bits; truncate it.
                               `(logand (lsh ,value-symbol ,shift) #xFFFFFFFF)
                             `(lsh ,value-symbol ,shift)))))))
         (let* ((result
-                (logxor (xorshift -12 (xorshift 17 (aref array index)))
-                        (xorshift -15 (xorshift 13 (aref array (as-index (+ index 33))))))))
+                (logxor
+                 (xorshift -12 (xorshift 17 (aref array index)))
+                 (xorshift -15 (xorshift 13 (aref array
+                                                  (as-index (+ index 33))))))))
           (aset array index result)
           (setq index (as-index (1+ index)))
           result)))))
@@ -826,7 +841,9 @@ LIMIT must be a non-negative integer."
    ((< limit #xFFFFFFFF) (wordgen--prng-next-int-small limit rng))
    ((= limit #xFFFFFFFF) (funcall rng))
    (t (let ((result nil))
-        (while (> (setq result (+ (lsh (wordgen-prng-next-int (lsh limit -32) rng) 32)
+        (while (> (setq result (+ (lsh (wordgen-prng-next-int
+                                        (lsh limit -32) rng)
+                                       32)
                                   (funcall rng)))
                   limit))
         result))))
