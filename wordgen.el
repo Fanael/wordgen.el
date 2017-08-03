@@ -2,7 +2,7 @@
 
 ;; Author: Fanael Linithien <fanael4@gmail.com>
 ;; URL: https://github.com/Fanael/wordgen.el
-;; Package-Version: 0.1.2
+;; Package-Version: 0.1.3
 ;; Package-Requires: ((emacs "24") (cl-lib "0.5"))
 
 ;; This file is NOT part of GNU Emacs.
@@ -334,7 +334,7 @@ CHILDREN is sorted according to RUNNING-WEIGHT, ascending."
   (func :read-only t))
 
 (wordgen--define-derived-expr-type (rand-int 'integer)
-    (wordgen--expr-rand-int-make (lower-bound upper-bound))
+    (wordgen--expr-rand-int-make (lower-bound upper-bound original-form))
   (lower-bound :read-only t)
   (upper-bound :read-only t))
 
@@ -462,11 +462,13 @@ EXPRESSION is the whole (rand-int ...) list."
     (`(,upper-bound)
      (wordgen--expr-rand-int-make
       (wordgen--expr-integer-make 0 0)
-      (wordgen--parse-expression upper-bound)))
+      (wordgen--parse-expression upper-bound)
+      expression))
     (`(,lower-bound ,upper-bound)
      (wordgen--expr-rand-int-make
       (wordgen--parse-expression lower-bound)
-      (wordgen--parse-expression upper-bound)))
+      (wordgen--parse-expression upper-bound)
+      expression))
     (_
      (error "Invalid rand-int expression %S: expects 1-2 arguments, %d given"
             expression (length (cdr expression))))))
