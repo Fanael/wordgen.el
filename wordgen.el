@@ -468,7 +468,7 @@ EXPRESSION is the whole (rand-int ...) list."
       (wordgen--parse-expression lower-bound)
       (wordgen--parse-expression upper-bound)))
     (_
-     (error "Invalid rand-int epxression %S: expects 1-2 arguments, %d given"
+     (error "Invalid rand-int expression %S: expects 1-2 arguments, %d given"
             expression (length (cdr expression))))))
 
 (defun wordgen--parse-unique-identifier (expression)
