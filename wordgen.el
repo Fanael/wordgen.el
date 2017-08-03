@@ -2,12 +2,12 @@
 
 ;; Author: Fanael Linithien <fanael4@gmail.com>
 ;; URL: https://github.com/Fanael/wordgen.el
-;; Package-Version: 0.1
+;; Package-Version: 0.1.1
 ;; Package-Requires: ((emacs "24") (cl-lib "0.5"))
 
 ;; This file is NOT part of GNU Emacs.
 
-;; Copyright (c) 2015-2016, Fanael Linithien
+;; Copyright (c) 2015-2017, Fanael Linithien
 ;; All rights reserved.
 ;;
 ;; Redistribution and use in source and binary forms, with or without
@@ -99,6 +99,13 @@ EXPRESSION can be one of the following:
    example:
    \(concat-reeval 2 [\"a\" \"b\"]) may evaluate to \"aa\", \"ab\", \"ba\"
    or \"bb\".
+
+ * A list (rand-int UPPER-BOUND) or (rand-int LOWER-BOUND UPPER-BOUND), which
+   evaluates expressions LOWER-BOUND and UPPER-BOUND, then returns an random
+   integer in the range [LOWER-BOUND..UPPER-BOUND); when LOWER-BOUND is greater
+   than or equal to UPPER-BOUND, LOWER-BOUND is always returned. When
+   LOWER-BOUND is not present, it is assumed to be 0. For example:
+   \(rand-int 3) may evaluate to 0, 1 or 2.
 
  * A list (lisp FUNC), where FUNC is an expression evaluating to a Lisp
    function. The function is called with two arguments (RULES RNG), where RULES
@@ -320,6 +327,11 @@ CHILDREN is sorted according to RUNNING-WEIGHT, ascending."
     (wordgen--expr-lisp-call-make (func original-form))
   (func :read-only t))
 
+(wordgen--define-derived-expr-type (rand-int 'integer)
+    (wordgen--expr-rand-int-make (lower-bound upper-bound))
+  (lower-bound :read-only t)
+  (upper-bound :read-only t))
+
 (defun wordgen--parse-expression (expression)
   "Compile wordgen EXPRESSION to intermediate representation."
   (pcase expression
@@ -331,6 +343,7 @@ CHILDREN is sorted according to RUNNING-WEIGHT, ascending."
     (`(replicate . ,_) (wordgen--parse-replicate expression))
     (`(concat-reeval . ,_) (wordgen--parse-concat-reeval expression))
     (`(lisp . ,_) (wordgen--parse-lisp-call expression))
+    (`(rand-int . ,_) (wordgen--parse-rand-int expression))
     (_ (error "Invalid expression %S" expression))))
 
 (defun wordgen--parse-string (string)
@@ -431,6 +444,22 @@ EXPRESSION is the whole (lisp ...) list."
      (error "Invalid Lisp expression %S: expects 1 argument, %d given"
             expression (length (cdr expression))))))
 
+(defun wordgen--parse-rand-int (expression)
+  "Compile a rand-int expression to intermediate representation.
+EXPRESSION is the whole (rand-int ...) list."
+  (pcase (cdr expression)
+    (`(,upper-bound)
+     (wordgen--expr-rand-int-make
+      (wordgen--expr-integer-make 0 0)
+      (wordgen--parse-expression upper-bound)))
+    (`(,lower-bound ,upper-bound)
+     (wordgen--expr-rand-int-make
+      (wordgen--parse-expression lower-bound)
+      (wordgen--parse-expression upper-bound)))
+    (_
+     (error "Invalid rand-int epxression %S: expects 1-2 arguments, %d given"
+            expression (length (cdr expression))))))
+
 
 ;;; IR-based type checking
 
@@ -460,7 +489,7 @@ The returned value is unspecified."
          ;; So we later know what to do when compiling.
          (setf (wordgen--expr-type expr) type))
         ;; These types won't even reach this point.
-        ((integer string rule-call concat replicate concat-reeval)
+        ((integer string rule-call concat replicate concat-reeval rand-int)
          nil)))
      (t
       (error "Expected type `%S', but %S is of type `%S'"
@@ -490,6 +519,13 @@ The returned value is unspecified."
        (wordgen--expr-typecheck-children reps)
        (wordgen--expr-expect-type form 'string)
        (wordgen--expr-typecheck-children form)))
+    (rand-int
+     (let ((lower-bound (wordgen--expr-rand-int-lower-bound expr))
+           (upper-bound (wordgen--expr-rand-int-upper-bound expr)))
+       (wordgen--expr-expect-type lower-bound 'integer)
+       (wordgen--expr-typecheck-children lower-bound)
+       (wordgen--expr-expect-type upper-bound 'integer)
+       (wordgen--expr-typecheck-children upper-bound)))
     ((integer string rule-call lisp-call)
      nil)))
 
@@ -551,7 +587,9 @@ instead."
     (concat-reeval
      (wordgen--expr-concat-reeval-compile expr))
     (lisp-call
-     (wordgen--expr-lisp-call-compile expr))))
+     (wordgen--expr-lisp-call-compile expr))
+    (rand-int
+     (wordgen--expr-rand-int-compile expr))))
 
 (defun wordgen--expr-choice-compile (choice)
   "Compile a CHOICE expression to an Emacs Lisp form."
@@ -660,7 +698,7 @@ object."
      (wordgen--expr-string-value subexpr))
     (integer
      (wordgen--expr-integer-value subexpr))
-    ((concat rule-call lisp-call replicate concat-reeval choice)
+    ((concat rule-call lisp-call replicate concat-reeval choice rand-int)
      (wordgen--compile-elisp-to-lambda (wordgen--expr-compile subexpr)))))
 
 (cl-defsubst wordgen--eval-choice-subexpression (subexpr rules rng)
@@ -691,7 +729,8 @@ If all CHILDREN are string literals, integer literals, or lambdas, symbols
                (wordgen--expr-case child child-type
                  ((integer string)
                   child-type)
-                 ((concat choice rule-call lisp-call replicate concat-reeval)
+                 ((concat choice rule-call lisp-call replicate concat-reeval
+                          rand-int)
                   'lambda))))
           ;; Mixed-type list.
           (when (and type (not (eq child-type type)))
@@ -745,6 +784,20 @@ If all CHILDREN are string literals, integer literals, or lambdas, symbols
     (`string #'stringp)
     (`integer #'integerp)
     (_ (error "Unknown type %S" type))))
+
+(defun wordgen--expr-rand-int-compile (rand-int)
+  "Compile a RAND-INT expression to an Emacs Lisp form."
+  (let ((lower-bound
+         (wordgen--expr-compile
+          (wordgen--expr-rand-int-lower-bound rand-int)))
+        (upper-bound
+         (wordgen--expr-compile
+          (wordgen--expr-rand-int-upper-bound rand-int))))
+    `(let* ((lower ,lower-bound)
+            (upper ,upper-bound))
+       (if (>= lower upper)
+           lower
+         (+ lower (wordgen-prng-next-int (- upper lower) rng))))))
 
 
 ;;; PRNG helpers
