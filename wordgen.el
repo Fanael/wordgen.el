@@ -2,7 +2,7 @@
 
 ;; Author: Fanael Linithien <fanael4@gmail.com>
 ;; URL: https://github.com/Fanael/wordgen.el
-;; Package-Version: 0.1.1
+;; Package-Version: 0.1.2
 ;; Package-Requires: ((emacs "24") (cl-lib "0.5"))
 
 ;; This file is NOT part of GNU Emacs.
@@ -107,6 +107,10 @@ EXPRESSION can be one of the following:
    LOWER-BOUND is not present, it is assumed to be 0. For example:
    \(rand-int 3) may evaluate to 0, 1 or 2.
 
+ * A list (unique-identifier PREFIX), which evaluates the expression PREFIX,
+   then returns a unique string with the given PREFIX. For example:
+   \(unique-identifier \"foo-\") may evaluate to \"foo-1234\".
+
  * A list (lisp FUNC), where FUNC is an expression evaluating to a Lisp
    function. The function is called with two arguments (RULES RNG), where RULES
    is the compiled RULESET as returned by `wordgen-compile-ruleset' and RNG is
@@ -157,6 +161,7 @@ RULESET should be a rule set of the same form as in `wordgen', which see."
     rules))
 
 (defvar wordgen--output-strings '())
+(defvar wordgen--unique-identifier-counter 0)
 
 (defmacro wordgen-with-output-to-string (&rest body)
   "Execute BODY, returning the strings passed to `wordgen-print-string'.
@@ -179,8 +184,9 @@ The string is printed to the innermost enclosing
 (defun wordgen-evaluate-ruleset (ruleset rng &optional starting-rule)
   "Evaluate the RULESET using pseudo-random generator RNG.
 Evaluation starts from STARTING-RULE; if that's nil, it starts from `result'."
-  (wordgen-with-output-to-string
-    (wordgen-call-rule-by-name ruleset rng (or starting-rule 'result))))
+  (let ((wordgen--unique-identifier-counter 0))
+    (wordgen-with-output-to-string
+      (wordgen-call-rule-by-name ruleset rng (or starting-rule 'result)))))
 
 (defun wordgen-call-rule-by-name (ruleset rng rule-name)
   "Call a rule using its name.
@@ -332,6 +338,10 @@ CHILDREN is sorted according to RUNNING-WEIGHT, ascending."
   (lower-bound :read-only t)
   (upper-bound :read-only t))
 
+(wordgen--define-derived-expr-type (unique-identifier 'string)
+    (wordgen--expr-unique-identifier-make (prefix original-form))
+  (prefix :read-only t))
+
 (defun wordgen--parse-expression (expression)
   "Compile wordgen EXPRESSION to intermediate representation."
   (pcase expression
@@ -344,6 +354,7 @@ CHILDREN is sorted according to RUNNING-WEIGHT, ascending."
     (`(concat-reeval . ,_) (wordgen--parse-concat-reeval expression))
     (`(lisp . ,_) (wordgen--parse-lisp-call expression))
     (`(rand-int . ,_) (wordgen--parse-rand-int expression))
+    (`(unique-identifier . ,_) (wordgen--parse-unique-identifier expression))
     (_ (error "Invalid expression %S" expression))))
 
 (defun wordgen--parse-string (string)
@@ -460,6 +471,19 @@ EXPRESSION is the whole (rand-int ...) list."
      (error "Invalid rand-int epxression %S: expects 1-2 arguments, %d given"
             expression (length (cdr expression))))))
 
+(defun wordgen--parse-unique-identifier (expression)
+  "Compile a unique-identifier expression to intermediate representation.
+EXPRESSION is the whole (unique-identifier ...) list."
+  (pcase (cdr expression)
+    (`(,prefix)
+     (wordgen--expr-unique-identifier-make
+      (wordgen--parse-expression prefix)
+      expression))
+    (_
+     (error
+      "Invalid unique-identifier expression %S: expects 1 argument, %d given"
+      expression (length (cdr expression))))))
+
 
 ;;; IR-based type checking
 
@@ -489,7 +513,8 @@ The returned value is unspecified."
          ;; So we later know what to do when compiling.
          (setf (wordgen--expr-type expr) type))
         ;; These types won't even reach this point.
-        ((integer string rule-call concat replicate concat-reeval rand-int)
+        ((integer string rule-call concat replicate concat-reeval rand-int
+                  unique-identifier)
          nil)))
      (t
       (error "Expected type `%S', but %S is of type `%S'"
@@ -526,6 +551,10 @@ The returned value is unspecified."
        (wordgen--expr-typecheck-children lower-bound)
        (wordgen--expr-expect-type upper-bound 'integer)
        (wordgen--expr-typecheck-children upper-bound)))
+    (unique-identifier
+     (let ((prefix (wordgen--expr-unique-identifier-prefix expr)))
+       (wordgen--expr-expect-type prefix 'string)
+       (wordgen--expr-typecheck-children prefix)))
     ((integer string rule-call lisp-call)
      nil)))
 
@@ -589,7 +618,9 @@ instead."
     (lisp-call
      (wordgen--expr-lisp-call-compile expr))
     (rand-int
-     (wordgen--expr-rand-int-compile expr))))
+     (wordgen--expr-rand-int-compile expr))
+    (unique-identifier
+     (wordgen--expr-unique-identifier-compile expr))))
 
 (defun wordgen--expr-choice-compile (choice)
   "Compile a CHOICE expression to an Emacs Lisp form."
@@ -698,7 +729,8 @@ object."
      (wordgen--expr-string-value subexpr))
     (integer
      (wordgen--expr-integer-value subexpr))
-    ((concat rule-call lisp-call replicate concat-reeval choice rand-int)
+    ((concat rule-call lisp-call replicate concat-reeval choice rand-int
+             unique-identifier)
      (wordgen--compile-elisp-to-lambda (wordgen--expr-compile subexpr)))))
 
 (cl-defsubst wordgen--eval-choice-subexpression (subexpr rules rng)
@@ -730,7 +762,7 @@ If all CHILDREN are string literals, integer literals, or lambdas, symbols
                  ((integer string)
                   child-type)
                  ((concat choice rule-call lisp-call replicate concat-reeval
-                          rand-int)
+                          rand-int unique-identifier)
                   'lambda))))
           ;; Mixed-type list.
           (when (and type (not (eq child-type type)))
@@ -798,6 +830,17 @@ If all CHILDREN are string literals, integer literals, or lambdas, symbols
        (if (>= lower upper)
            lower
          (+ lower (wordgen-prng-next-int (- upper lower) rng))))))
+
+(defun wordgen--expr-unique-identifier-compile (unique-identifier)
+  "Compile a UNIQUE-IDENTIFIER expression to an Emacs Lisp form."
+  (let ((prefix
+         (wordgen--expr-compile
+          (wordgen--expr-unique-identifier-prefix unique-identifier))))
+    `(wordgen-print-string
+      (concat ,prefix
+              (number-to-string
+               (setq wordgen--unique-identifier-counter
+                     (1+ wordgen--unique-identifier-counter)))))))
 
 
 ;;; PRNG helpers
